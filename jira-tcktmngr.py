@@ -143,6 +143,124 @@ class JiraDescendantFinder:
                 else:
                     print(f"  HTTP Status: {e.response.status_code}")
             return False
+    
+    def check_claude_available(self) -> bool:
+        """Check if claude CLI is available on the system."""
+        import subprocess
+        try:
+            result = subprocess.run(['claude', '--version'], capture_output=True, text=True, timeout=5)
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+            return False
+    
+    def get_issue_detailed(self, issue_key: str) -> Optional[Dict]:
+        """Fetch detailed issue information including description and comments."""
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+        params = {
+            'expand': 'subtask,issuelinks,comments',
+            'fields': 'summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,comment'
+        }
+        
+        try:
+            response = self.session.get(url, params=params)
+            if response.status_code == 429:  # Rate limited
+                time.sleep(2)
+                response = self.session.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            print(f"Error fetching issue {issue_key}: {e}")
+            return None
+    
+    def summarize_issue(self, issue_key: str) -> bool:
+        """Summarize an issue using claude CLI if available."""
+        import subprocess
+        
+        if not self.check_claude_available():
+            print("Error: claude CLI is not available on this system.")
+            print("Please install claude CLI to use the summarize feature.")
+            return False
+        
+        issue_data = self.get_issue_detailed(issue_key)
+        if not issue_data:
+            print(f"Could not fetch issue {issue_key}")
+            return False
+        
+        fields = issue_data.get('fields', {})
+        
+        # Build content to summarize
+        content_parts = []
+        content_parts.append(f"Issue: {issue_key}")
+        content_parts.append(f"Summary: {fields.get('summary', 'No summary')}")
+        content_parts.append(f"Type: {fields.get('issuetype', {}).get('name', 'Unknown')}")
+        content_parts.append(f"Status: {fields.get('status', {}).get('name', 'Unknown')}")
+        
+        if fields.get('labels'):
+            content_parts.append(f"Labels: {', '.join(fields.get('labels'))}")
+        
+        description = fields.get('description')
+        if description:
+            content_parts.append(f"\nDescription:\n{description}")
+        
+        # Add comments if any
+        comments = fields.get('comment', {}).get('comments', [])
+        if comments:
+            content_parts.append("\nComments:")
+            for i, comment in enumerate(comments[-5:], 1):  # Last 5 comments
+                author = comment.get('author', {}).get('displayName', 'Unknown')
+                body = comment.get('body', '')
+                content_parts.append(f"\nComment {i} by {author}:\n{body}")
+        
+        issue_content = "\n".join(content_parts)
+        
+        try:
+            # Use claude CLI to summarize
+            full_prompt = f"""Please provide a concise summary of this Jira ticket, highlighting the key points, current status, and any important details or recent developments:
+
+{issue_content}"""
+            
+            cmd = ['claude', '--print', full_prompt]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                # Disable colors if not outputting to a terminal
+                if not sys.stdout.isatty():
+                    Colors.disable_colors()
+                
+                print(f"\n{Colors.BOLD}{Colors.CYAN}Summary for {issue_key}:{Colors.RESET}")
+                print(f"{Colors.BLUE}{'=' * 50}{Colors.RESET}")
+                
+                # Color-code the summary output
+                summary_lines = result.stdout.strip().split('\n')
+                for line in summary_lines:
+                    if line.startswith('**') and line.endswith('**'):
+                        # Headers/titles in bold cyan
+                        print(f"{Colors.BOLD}{Colors.CYAN}{line}{Colors.RESET}")
+                    elif line.startswith('- ') or line.startswith('• '):
+                        # Bullet points in green
+                        print(f"{Colors.GREEN}{line}{Colors.RESET}")
+                    elif ':' in line and not line.strip().startswith('-'):
+                        # Lines with colons (key-value pairs) - make the key bold
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            print(f"{Colors.BOLD}{parts[0]}:{Colors.RESET}{parts[1]}")
+                        else:
+                            print(line)
+                    else:
+                        # Regular text
+                        print(line)
+                
+                return True
+            else:
+                print(f"Error running claude CLI: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print("Error: claude CLI timed out")
+            return False
+        except Exception as e:
+            print(f"Error running claude CLI: {e}")
+            return False
         
     def get_issue(self, issue_key: str) -> Optional[Dict]:
         """Fetch issue details from Jira API."""
@@ -1110,6 +1228,29 @@ def action_reopen_ticket(args):
         print(f"\nFailed to reopen issue {args.issue_key}.")
 
 
+def action_summarize(args):
+    """Summarize a Jira issue using Claude AI."""
+    try:
+        config = JiraConfig(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+    
+    if not all([config.base_url, config.username, config.api_token]):
+        print("Error: Missing required configuration values (base_url, username, api_token)")
+        print("Please check your config file")
+        sys.exit(1)
+    
+    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+    
+    print(f"Summarizing issue {args.issue_key}...")
+    success = finder.summarize_issue(args.issue_key)
+    
+    if not success:
+        sys.exit(1)
+
+
 def action_find_descendants(args):
     """Find all descendants of a Jira issue."""
     try:
@@ -1206,6 +1347,11 @@ def main():
     find_parser.add_argument('--status', action='store_true', help='Show issue status in output')
     find_parser.add_argument('--labels', action='store_true', help='Show issue labels in output')
     find_parser.set_defaults(func=action_find_descendants)
+    
+    # summarize action
+    summarize_parser = subparsers.add_parser('summarize', help='Summarize a Jira issue using Claude AI (requires claude CLI)')
+    summarize_parser.add_argument('issue_key', help='The issue key to summarize (e.g., PROJ-123)')
+    summarize_parser.set_defaults(func=action_summarize)
     
     args = parser.parse_args()
     args.func(args)

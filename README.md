@@ -11,12 +11,14 @@ A comprehensive command-line tool for managing Jira tickets and their hierarchie
 - **Authentication Testing**: Verify Jira API credentials
 - **Export Capabilities**: Export hierarchies to JSON format
 - **Debug Mode**: Analyze issue links and relationships
+- **AI Summarization**: Generate concise summaries of tickets using Claude AI (requires claude CLI)
 
 ## Requirements
 
 - Python 3.6+
 - `requests` library
 - Valid Jira API credentials (username and API token)
+- Optional: `claude` CLI for AI summarization features
 
 ## Configuration
 
@@ -86,6 +88,14 @@ python jira-tcktmngr.py close-ticket PROJ-123 --include-children
 # Reopen a closed ticket
 python jira-tcktmngr.py reopen-ticket PROJ-123
 ```
+
+### AI Summarization
+```bash
+# Generate a concise summary of a ticket using Claude AI
+python jira-tcktmngr.py summarize PROJ-123
+```
+
+**Note**: The summarize feature requires the `claude` CLI tool to be installed and available in your PATH. The tool will automatically check for availability and provide instructions if not found.
 
 ## How It Works
 
