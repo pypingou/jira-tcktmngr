@@ -253,6 +253,7 @@ class JiraIssue:
     status: str
     labels: List[str]
     level: int = 0
+    sub_system_group: Optional[str] = None
 
 
 class JiraConfig:
@@ -357,7 +358,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks,comments",
-            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,comment",
+            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,comment",
         }
 
         try:
@@ -477,7 +478,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks",
-            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140",
+            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540",
         }
 
         try:
@@ -551,6 +552,16 @@ class JiraDescendantFinder:
                     or "key" in field_str.lower()
                 ):
                     print(f"    {field_name}: {field_value}")
+
+        # Check for sub-system group field specifically
+        sub_system_group_candidates = ["customfield_12326540", "customfield_12312940", "customfield_12313940", "Sub-System Group"]
+        print(f"\n  Sub-System Group field candidates:")
+        for field_candidate in sub_system_group_candidates:
+            value = fields.get(field_candidate)
+            if value:
+                print(f"    {field_candidate}: {value}")
+            else:
+                print(f"    {field_candidate}: (not found)")
 
         # Search for issues that have this as Epic
         if fields.get("issuetype", {}).get("name") in ["Epic", "Feature", "Initiative"]:
@@ -743,6 +754,19 @@ class JiraDescendantFinder:
     ) -> JiraIssue:
         """Create a JiraIssue object from API response data."""
         fields = issue_data.get("fields", {})
+
+        # Extract sub-system group field - try multiple possible field names
+        sub_system_group = None
+        for field_candidate in ["customfield_12326540", "customfield_12312940", "customfield_12313940", "Sub-System Group"]:
+            value = fields.get(field_candidate)
+            if value:
+                # Handle different possible formats (string, dict with value/name, etc.)
+                if isinstance(value, dict):
+                    sub_system_group = value.get("value") or value.get("name") or str(value)
+                else:
+                    sub_system_group = str(value)
+                break
+
         return JiraIssue(
             key=issue_key,
             summary=fields.get("summary", ""),
@@ -750,6 +774,7 @@ class JiraDescendantFinder:
             status=fields.get("status", {}).get("name", ""),
             labels=fields.get("labels", []),
             level=level,
+            sub_system_group=sub_system_group,
         )
 
     def _find_subtask_children(self, fields: Dict, level: int) -> List[JiraIssue]:
@@ -1096,6 +1121,7 @@ class JiraDescendantFinder:
         show_type: bool = False,
         show_status: bool = False,
         show_labels: bool = False,
+        show_sub_system_group: bool = False,
     ) -> None:
         """Print the issue hierarchy in a tree format with color coding."""
         if not issues:
@@ -1138,6 +1164,8 @@ class JiraDescendantFinder:
                     f"{Colors.YELLOW}{', '.join(issue.labels)}{Colors.RESET}"
                 )
                 details.append(f"Labels: {colored_labels}")
+            if show_sub_system_group and issue.sub_system_group:
+                details.append(f"Sub-System Group: {Colors.CYAN}{issue.sub_system_group}{Colors.RESET}")
 
             details_str = (
                 f"    {Colors.DIM}[{', '.join(details)}]{Colors.RESET}"
@@ -1159,6 +1187,7 @@ class JiraDescendantFinder:
                 "status": issue.status,
                 "labels": issue.labels,
                 "level": issue.level,
+                "sub_system_group": issue.sub_system_group,
             }
             for issue in issues
         ]
@@ -1690,6 +1719,7 @@ def action_find_descendants(args):
         show_type=args.type,
         show_status=args.status,
         show_labels=args.labels,
+        show_sub_system_group=args.sub_system_group,
     )
 
     if args.export:
@@ -1813,6 +1843,9 @@ def main() -> None:
     )
     find_parser.add_argument(
         "--labels", action="store_true", help="Show issue labels in output"
+    )
+    find_parser.add_argument(
+        "--sub-system-group", action="store_true", help="Show sub-system group in output"
     )
     find_parser.set_defaults(func=action_find_descendants)
 
