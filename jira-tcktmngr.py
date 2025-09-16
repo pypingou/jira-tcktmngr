@@ -980,6 +980,151 @@ class JiraDescendantFinder:
         return self.modify_label_on_issue(issue_key, label, add=False)
 
     @retry_with_backoff()
+    def get_sub_system_group_options(self) -> List[Dict]:
+        """Get available Sub-System group options from Jira."""
+        # First, get field metadata to find the custom field options
+        url = f"{self.base_url}/rest/api/2/field"
+
+        try:
+            response = self.session.get(url)
+            if response.status_code == 429:
+                raise RateLimitError("Rate limited while fetching field metadata")
+            self._handle_response_errors(response)
+
+            fields = response.json()
+            for field in fields:
+                if field.get("id") == "customfield_12326540":
+                    # Found the Sub-System group field, get its options
+                    if "allowedValues" in field:
+                        return field["allowedValues"]
+                    break
+
+            # If no allowedValues in field metadata, try alternative approach
+            # Make a request to get field configuration
+            field_url = f"{self.base_url}/rest/api/2/customField/customfield_12326540/option"
+            response = self.session.get(field_url)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("values", [])
+
+            return []
+
+        except (RateLimitError, AuthenticationError, APIError):
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error fetching sub-system group options: {e}")
+            return []
+
+    @retry_with_backoff()
+    def modify_sub_system_group_on_issue(
+        self, issue_key: str, value: str, operation: str = "append"
+    ) -> bool:
+        """Modify the Sub-System group field on a single issue.
+
+        Args:
+            issue_key: The issue key to modify
+            value: The sub-system group value to add/remove/set
+            operation: 'append', 'remove', or 'replace'
+        """
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+
+        # First get current sub-system group values
+        issue_data = self.get_issue(issue_key)
+        if not issue_data:
+            return False
+
+        fields = issue_data.get("fields", {})
+        current_field_value = fields.get("customfield_12326540")
+
+        # Parse current values
+        current_values = []
+        if current_field_value:
+            if isinstance(current_field_value, list):
+                current_values = current_field_value
+            else:
+                current_values = [current_field_value]
+
+        # Get current value strings for comparison
+        current_value_strings = []
+        for val in current_values:
+            if isinstance(val, dict):
+                current_value_strings.append(val.get("value", str(val)))
+            else:
+                current_value_strings.append(str(val))
+
+        # Determine new values based on operation
+        if operation == "replace":
+            # Replace entire list with single new value
+            new_values = [{"value": value}]
+            action_verb = "Set"
+        elif operation == "append":
+            # Add new value if not already present
+            if value in current_value_strings:
+                print(f"  {issue_key}: Sub-System group '{value}' already exists")
+                return True
+            new_values = current_values + [{"value": value}]
+            action_verb = "Added"
+        elif operation == "remove":
+            # Remove value if present
+            if value not in current_value_strings:
+                print(f"  {issue_key}: Sub-System group '{value}' does not exist")
+                return True
+            new_values = [val for val in current_values
+                         if (isinstance(val, dict) and val.get("value") != value) or
+                            (not isinstance(val, dict) and str(val) != value)]
+            action_verb = "Removed"
+        else:
+            raise ValueError(f"Invalid operation: {operation}")
+
+        # If field is single-select, only take first value
+        if len(new_values) > 1:
+            # Check if field allows multiple values by trying to set multiple
+            # For now, assume single-select and use first value
+            new_values = new_values[:1] if new_values else []
+
+        payload = {"fields": {"customfield_12326540": new_values[0] if new_values else None}}
+
+        try:
+            response = self.session.put(url, json=payload)
+            if response.status_code == 429:
+                raise RateLimitError(
+                    f"Rate limited while modifying sub-system group on {issue_key}"
+                )
+
+            if response.status_code == 204:  # Success
+                print(f"  ✓ {issue_key}: {action_verb} sub-system group '{value}'")
+                return True
+            else:
+                self.logger.error(
+                    f"Failed to modify sub-system group on {issue_key}: HTTP {response.status_code}"
+                )
+                print(
+                    f"  ✗ {issue_key}: Failed to modify sub-system group (HTTP {response.status_code})"
+                )
+                if response.text:
+                    print(f"      Error details: {response.text}")
+                return False
+
+        except (RateLimitError, AuthenticationError, APIError):
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error modifying sub-system group on {issue_key}: {e}")
+            print(f"  ✗ {issue_key}: Error modifying sub-system group - {e}")
+            return False
+
+    def add_sub_system_group_to_issue(self, issue_key: str, value: str) -> bool:
+        """Add a sub-system group to a single issue."""
+        return self.modify_sub_system_group_on_issue(issue_key, value, "append")
+
+    def remove_sub_system_group_from_issue(self, issue_key: str, value: str) -> bool:
+        """Remove a sub-system group from a single issue."""
+        return self.modify_sub_system_group_on_issue(issue_key, value, "remove")
+
+    def replace_sub_system_group_on_issue(self, issue_key: str, value: str) -> bool:
+        """Replace the sub-system group on a single issue."""
+        return self.modify_sub_system_group_on_issue(issue_key, value, "replace")
+
+    @retry_with_backoff()
     def get_available_transitions(self, issue_key: str) -> List[Dict]:
         """Get available transitions for an issue."""
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}/transitions"
@@ -1740,6 +1885,169 @@ def action_find_descendants(args):
     print(f"Maximum depth: {max_level}")
 
 
+def action_edit_sub_system_group(args):
+    """Edit the Sub-System group field on an issue and optionally its descendants."""
+    try:
+        config = JiraConfig(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+
+    if not all([config.base_url, config.username, config.api_token]):
+        print(
+            "Error: Missing required configuration values (base_url, username, api_token)"
+        )
+        print("Please check your config file")
+        sys.exit(1)
+
+    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+
+    # Determine operation and method
+    if args.operation == "append":
+        operation_func = finder.add_sub_system_group_to_issue
+        operation_name = f"adding sub-system group '{args.value}'"
+    elif args.operation == "remove":
+        operation_func = finder.remove_sub_system_group_from_issue
+        operation_name = f"removing sub-system group '{args.value}'"
+    elif args.operation == "replace":
+        operation_func = finder.replace_sub_system_group_on_issue
+        operation_name = f"setting sub-system group to '{args.value}'"
+    else:
+        print(f"Error: Invalid operation '{args.operation}'")
+        sys.exit(1)
+
+    try:
+        if args.include_children:
+            print(f"Finding all descendants of {args.issue_key}...")
+            all_issues = finder.find_descendants(args.issue_key)
+            if not all_issues:
+                print(f"No issues found for {args.issue_key}")
+                return
+
+            # Filter out closed issues
+            open_issues = [
+                issue
+                for issue in all_issues
+                if not finder.is_issue_closed(issue.status)
+            ]
+            closed_issues = [
+                issue for issue in all_issues if finder.is_issue_closed(issue.status)
+            ]
+
+            if not open_issues:
+                print(
+                    f"No open issues found for {args.issue_key} (all {len(closed_issues)} issues are closed)"
+                )
+                return
+
+            print(
+                f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
+            )
+            print("Open issues that will be affected:")
+            print("=" * 50)
+            finder.print_hierarchy(open_issues, show_labels=True, show_sub_system_group=True)
+
+            if closed_issues:
+                print(f"\nSkipping {len(closed_issues)} closed issues:")
+                for issue in closed_issues:
+                    print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
+
+            print(f"\nThis will perform '{operation_name}' on {len(open_issues)} open issues.")
+            target_issues = open_issues
+
+        else:
+            # Just the single issue
+            issue_data = finder.get_issue(args.issue_key)
+            if not issue_data:
+                print(f"Issue {args.issue_key} not found")
+                return
+
+            fields = issue_data.get("fields", {})
+            current_sub_system_group = fields.get("customfield_12326540")
+            issue_status = fields.get("status", {}).get("name", "")
+
+            # Check if single issue is closed
+            if finder.is_issue_closed(issue_status):
+                print(
+                    f"Issue {args.issue_key} is closed (Status: {issue_status}). Skipping sub-system group modification."
+                )
+                return
+
+            # Display current sub-system group
+            if current_sub_system_group:
+                if isinstance(current_sub_system_group, dict):
+                    current_value = current_sub_system_group.get("value", str(current_sub_system_group))
+                else:
+                    current_value = str(current_sub_system_group)
+                print(f"Current Sub-System Group: {current_value}")
+            else:
+                print("Current Sub-System Group: None")
+
+            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
+            print(f"Status: {issue_status}")
+            print(f"\nThis will perform '{operation_name}' on this issue only.")
+            target_issues = [
+                finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
+            ]
+
+        # Use bulk operation
+        finder._perform_bulk_operation(
+            target_issues,
+            operation_name,
+            operation_func,
+            args.value,
+        )
+
+    except (AuthenticationError, APIError, RateLimitError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def action_list_sub_system_groups(args):
+    """List available Sub-System group options."""
+    try:
+        config = JiraConfig(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+
+    if not all([config.base_url, config.username, config.api_token]):
+        print(
+            "Error: Missing required configuration values (base_url, username, api_token)"
+        )
+        print("Please check your config file")
+        sys.exit(1)
+
+    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+
+    try:
+        print("Fetching available Sub-System group options...")
+        options = finder.get_sub_system_group_options()
+
+        if not options:
+            print("No Sub-System group options found or unable to fetch options.")
+            print("This might be due to permissions or field configuration.")
+            return
+
+        print(f"\nAvailable Sub-System group options ({len(options)}):")
+        print("=" * 50)
+        for option in options:
+            if isinstance(option, dict):
+                value = option.get("value", "")
+                option_id = option.get("id", "")
+                disabled = option.get("disabled", False)
+                status = " (disabled)" if disabled else ""
+                print(f"  {value}{status} (ID: {option_id})")
+            else:
+                print(f"  {option}")
+
+    except (AuthenticationError, APIError, RateLimitError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Jira descendants finder")
     parser.add_argument(
@@ -1857,6 +2165,36 @@ def main() -> None:
         "issue_key", help="The issue key to summarize (e.g., PROJ-123)"
     )
     summarize_parser.set_defaults(func=action_summarize)
+
+    # edit-sub-system-group action
+    edit_sub_system_group_parser = subparsers.add_parser(
+        "edit-sub-system-group",
+        help="Edit the Sub-System group field on an issue and optionally its descendants"
+    )
+    edit_sub_system_group_parser.add_argument(
+        "issue_key", help="The issue key to modify (e.g., PROJ-123)"
+    )
+    edit_sub_system_group_parser.add_argument(
+        "operation",
+        choices=["append", "remove", "replace"],
+        help="Operation to perform: append (add to existing), remove (remove value), or replace (set to value)"
+    )
+    edit_sub_system_group_parser.add_argument(
+        "value", help="The sub-system group value to add/remove/set"
+    )
+    edit_sub_system_group_parser.add_argument(
+        "--include-children",
+        action="store_true",
+        help="Also modify sub-system group on all descendant issues",
+    )
+    edit_sub_system_group_parser.set_defaults(func=action_edit_sub_system_group)
+
+    # list-sub-system-groups action
+    list_sub_system_groups_parser = subparsers.add_parser(
+        "list-sub-system-groups",
+        help="List available Sub-System group options"
+    )
+    list_sub_system_groups_parser.set_defaults(func=action_list_sub_system_groups)
 
     args = parser.parse_args()
 

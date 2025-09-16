@@ -6,6 +6,7 @@ A comprehensive command-line tool for managing Jira tickets and their hierarchie
 
 - **Find Descendants**: Recursively discover all child issues, subtasks, and linked tickets
 - **Label Management**: Add or remove labels from issues and their descendants
+- **Sub-System Group Management**: Edit Sub-System group fields with append, remove, or replace operations
 - **Ticket State Management**: Close or reopen tickets individually or in bulk
 - **Hierarchy Visualization**: Display ticket hierarchies in a colored tree format
 - **Authentication Testing**: Verify Jira API credentials
@@ -50,7 +51,7 @@ python jira-tcktmngr.py test-auth
 python jira-tcktmngr.py find PROJ-123
 
 # With additional details
-python jira-tcktmngr.py find PROJ-123 --type --status --labels
+python jira-tcktmngr.py find PROJ-123 --type --status --labels --sub-system-group
 
 # Debug mode to see all links and relationships
 python jira-tcktmngr.py find PROJ-123 --debug
@@ -72,6 +73,24 @@ python jira-tcktmngr.py remove-label PROJ-123 "needs-review"
 
 # Remove label from issue and all descendants
 python jira-tcktmngr.py remove-label PROJ-123 "needs-review" --include-children
+```
+
+### Sub-System Group Management
+```bash
+# List available Sub-System group options
+python jira-tcktmngr.py list-sub-system-groups
+
+# Set Sub-System group on a single issue (replace existing)
+python jira-tcktmngr.py edit-sub-system-group PROJ-123 replace "rhivos-new-component"
+
+# Add Sub-System group to existing value (append)
+python jira-tcktmngr.py edit-sub-system-group PROJ-123 append "rhivos-additional-component"
+
+# Remove specific Sub-System group value
+python jira-tcktmngr.py edit-sub-system-group PROJ-123 remove "rhivos-old-component"
+
+# Apply Sub-System group changes to issue and all descendants
+python jira-tcktmngr.py edit-sub-system-group PROJ-123 replace "rhivos-new-component" --include-children
 ```
 
 ### Ticket State Management
