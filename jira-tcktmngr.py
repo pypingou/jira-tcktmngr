@@ -992,20 +992,80 @@ class JiraDescendantFinder:
             self._handle_response_errors(response)
 
             fields = response.json()
+            sub_system_field = None
+
             for field in fields:
                 if field.get("id") == "customfield_12326540":
+                    sub_system_field = field
+                    self.logger.debug(f"Found Sub-System group field: {field}")
                     # Found the Sub-System group field, get its options
                     if "allowedValues" in field:
+                        self.logger.debug(f"Found allowedValues: {field['allowedValues']}")
                         return field["allowedValues"]
                     break
 
-            # If no allowedValues in field metadata, try alternative approach
-            # Make a request to get field configuration
+            if not sub_system_field:
+                self.logger.debug("Sub-System group field customfield_12326540 not found in field list")
+                # Log all custom fields for debugging
+                custom_fields = [f for f in fields if f.get("id", "").startswith("customfield_")]
+                self.logger.debug(f"Found {len(custom_fields)} custom fields")
+                for cf in custom_fields[:10]:  # Log first 10 for debugging
+                    self.logger.debug(f"Custom field: {cf.get('id')} - {cf.get('name')}")
+
+            # If no allowedValues in field metadata, try alternative approaches
+
+            # Try getting field configuration directly
             field_url = f"{self.base_url}/rest/api/2/customField/customfield_12326540/option"
+            self.logger.debug(f"Trying field options URL: {field_url}")
             response = self.session.get(field_url)
+            self.logger.debug(f"Field options response: {response.status_code}")
             if response.status_code == 200:
                 data = response.json()
+                self.logger.debug(f"Field options data: {data}")
                 return data.get("values", [])
+
+            # Try searching for existing tickets to extract possible values
+            self.logger.debug("Trying to extract values from existing tickets")
+            search_url = f"{self.base_url}/rest/api/2/search"
+            params = {
+                "jql": "project in (AUTOBU, VROOM) AND \"Sub-System Group\" is not EMPTY",
+                "fields": "customfield_12326540",
+                "maxResults": 50,
+            }
+
+            response = self.session.get(search_url, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                issues = data.get("issues", [])
+                self.logger.debug(f"Found {len(issues)} issues with Sub-System group values")
+
+                # Extract unique values with their IDs if available
+                unique_options = {}
+                for issue in issues:
+                    field_value = issue.get("fields", {}).get("customfield_12326540")
+                    if field_value:
+                        if isinstance(field_value, dict):
+                            value = field_value.get("value")
+                            option_id = field_value.get("id")
+                            if value:
+                                unique_options[value] = option_id
+                        elif isinstance(field_value, list):
+                            for item in field_value:
+                                if isinstance(item, dict):
+                                    value = item.get("value")
+                                    option_id = item.get("id")
+                                    if value:
+                                        unique_options[value] = option_id
+
+                self.logger.debug(f"Found unique options: {unique_options}")
+                # Convert to format similar to field options
+                result = []
+                for value in sorted(unique_options.keys()):
+                    option_dict = {"value": value}
+                    if unique_options[value]:
+                        option_dict["id"] = unique_options[value]
+                    result.append(option_dict)
+                return result
 
             return []
 
@@ -2036,10 +2096,15 @@ def action_list_sub_system_groups(args):
         for option in options:
             if isinstance(option, dict):
                 value = option.get("value", "")
-                option_id = option.get("id", "")
+                option_id = option.get("id")
                 disabled = option.get("disabled", False)
                 status = " (disabled)" if disabled else ""
-                print(f"  {value}{status} (ID: {option_id})")
+
+                # Only show ID if it exists and is not empty
+                if option_id:
+                    print(f"  {value}{status} (ID: {option_id})")
+                else:
+                    print(f"  {value}{status}")
             else:
                 print(f"  {option}")
 
