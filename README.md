@@ -29,7 +29,7 @@ The tool requires a configuration file with your Jira credentials. Create one us
 python jira-tcktmngr.py create-config
 ```
 
-This creates a config file at `~/.config/rh_jira` with the following format:
+This creates a config file at `~/.config/jira` with the following format:
 
 ```ini
 [jira]
