@@ -358,7 +358,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks,comments",
-            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,comment",
+            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940,comment",
         }
 
         try:
@@ -478,7 +478,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks",
-            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540",
+            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940",
         }
 
         try:
@@ -498,8 +498,19 @@ class JiraDescendantFinder:
 
     def debug_issue_links(self, issue_key: str) -> None:
         """Debug what links and subtasks exist for an issue."""
-        issue_data = self.get_issue(issue_key)
-        if not issue_data:
+        # For debug, fetch ALL fields
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+        params = {
+            "expand": "subtask,issuelinks",
+            "fields": "*all",
+        }
+
+        try:
+            response = self.session.get(url, params=params)
+            self._handle_response_errors(response)
+            issue_data = response.json()
+        except Exception as e:
+            print(f"Error fetching issue data: {e}")
             return
 
         fields = issue_data.get("fields", {})
@@ -553,8 +564,16 @@ class JiraDescendantFinder:
                 ):
                     print(f"    {field_name}: {field_value}")
 
-        # Check for sub-system group field specifically
-        sub_system_group_candidates = ["customfield_12326540", "customfield_12312940", "customfield_12313940", "Sub-System Group"]
+        # Look for fields that might be Sub-System Group related
+        print(f"\n  Fields potentially related to Sub-System Group:")
+        for field_name, field_value in fields.items():
+            if field_value:
+                field_str = str(field_value).lower()
+                if any(keyword in field_str for keyword in ["rhivos", "sub", "group", "system"]) or any(keyword in field_name.lower() for keyword in ["sub", "group", "system"]):
+                    print(f"    {field_name}: {field_value}")
+
+        # Check for sub-system group field specifically (customfield_12320851 is the actual Sub-System Group field)
+        sub_system_group_candidates = ["customfield_12320851", "customfield_12312940", "customfield_12313940", "Sub-System Group"]
         print(f"\n  Sub-System Group field candidates:")
         for field_candidate in sub_system_group_candidates:
             value = fields.get(field_candidate)
@@ -755,13 +774,19 @@ class JiraDescendantFinder:
         """Create a JiraIssue object from API response data."""
         fields = issue_data.get("fields", {})
 
-        # Extract sub-system group field - try multiple possible field names
+        # Extract sub-system group field - customfield_12320851 is the actual Sub-System Group field
         sub_system_group = None
-        for field_candidate in ["customfield_12326540", "customfield_12312940", "customfield_12313940", "Sub-System Group"]:
+        for field_candidate in ["customfield_12320851", "customfield_12312940", "customfield_12313940", "Sub-System Group"]:
             value = fields.get(field_candidate)
             if value:
-                # Handle different possible formats (string, dict with value/name, etc.)
-                if isinstance(value, dict):
+                # Handle different possible formats (string, dict with value/name, list of dicts, etc.)
+                if isinstance(value, list) and value:
+                    # Handle list of dictionaries (common for multi-select fields)
+                    if isinstance(value[0], dict):
+                        sub_system_group = value[0].get("value") or value[0].get("name") or str(value[0])
+                    else:
+                        sub_system_group = str(value[0])
+                elif isinstance(value, dict):
                     sub_system_group = value.get("value") or value.get("name") or str(value)
                 else:
                     sub_system_group = str(value)
@@ -995,7 +1020,7 @@ class JiraDescendantFinder:
             sub_system_field = None
 
             for field in fields:
-                if field.get("id") == "customfield_12326540":
+                if field.get("id") == "customfield_12320851":
                     sub_system_field = field
                     self.logger.debug(f"Found Sub-System group field: {field}")
                     # Found the Sub-System group field, get its options
@@ -1005,7 +1030,7 @@ class JiraDescendantFinder:
                     break
 
             if not sub_system_field:
-                self.logger.debug("Sub-System group field customfield_12326540 not found in field list")
+                self.logger.debug("Sub-System group field customfield_12320851 not found in field list")
                 # Log all custom fields for debugging
                 custom_fields = [f for f in fields if f.get("id", "").startswith("customfield_")]
                 self.logger.debug(f"Found {len(custom_fields)} custom fields")
@@ -1015,7 +1040,7 @@ class JiraDescendantFinder:
             # If no allowedValues in field metadata, try alternative approaches
 
             # Try getting field configuration directly
-            field_url = f"{self.base_url}/rest/api/2/customField/customfield_12326540/option"
+            field_url = f"{self.base_url}/rest/api/2/customField/customfield_12320851/option"
             self.logger.debug(f"Trying field options URL: {field_url}")
             response = self.session.get(field_url)
             self.logger.debug(f"Field options response: {response.status_code}")
@@ -1029,7 +1054,7 @@ class JiraDescendantFinder:
             search_url = f"{self.base_url}/rest/api/2/search"
             params = {
                 "jql": "project in (AUTOBU, VROOM) AND \"Sub-System Group\" is not EMPTY",
-                "fields": "customfield_12326540",
+                "fields": "customfield_12320851",
                 "maxResults": 50,
             }
 
@@ -1042,7 +1067,7 @@ class JiraDescendantFinder:
                 # Extract unique values with their IDs if available
                 unique_options = {}
                 for issue in issues:
-                    field_value = issue.get("fields", {}).get("customfield_12326540")
+                    field_value = issue.get("fields", {}).get("customfield_12320851")
                     if field_value:
                         if isinstance(field_value, dict):
                             value = field_value.get("value")
@@ -1094,7 +1119,7 @@ class JiraDescendantFinder:
             return False
 
         fields = issue_data.get("fields", {})
-        current_field_value = fields.get("customfield_12326540")
+        current_field_value = fields.get("customfield_12320851")
 
         # Parse current values
         current_values = []
@@ -1142,7 +1167,7 @@ class JiraDescendantFinder:
             # For now, assume single-select and use first value
             new_values = new_values[:1] if new_values else []
 
-        payload = {"fields": {"customfield_12326540": new_values[0] if new_values else None}}
+        payload = {"fields": {"customfield_12320851": new_values[0] if new_values else None}}
 
         try:
             response = self.session.put(url, json=payload)
@@ -2024,7 +2049,7 @@ def action_edit_sub_system_group(args):
                 return
 
             fields = issue_data.get("fields", {})
-            current_sub_system_group = fields.get("customfield_12326540")
+            current_sub_system_group = fields.get("customfield_12320851")
             issue_status = fields.get("status", {}).get("name", "")
 
             # Check if single issue is closed
