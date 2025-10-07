@@ -922,6 +922,7 @@ class JiraDescendantFinder:
         *args,
         confirm: bool = True,
         show_sub_system_group: bool = False,
+        show_assigned_team: bool = False,
     ) -> int:
         """Perform a bulk operation on multiple issues with confirmation."""
         if not issues:
@@ -931,7 +932,7 @@ class JiraDescendantFinder:
         # Show affected tickets
         print(f"\nAFFECTED TICKETS ({len(issues)}):")
         print("=" * 50)
-        self.print_hierarchy(issues, show_labels=True, show_sub_system_group=show_sub_system_group)
+        self.print_hierarchy(issues, show_labels=True, show_sub_system_group=show_sub_system_group, show_assigned_team=show_assigned_team)
 
         if confirm:
             response = input(
@@ -1222,6 +1223,173 @@ class JiraDescendantFinder:
     def replace_sub_system_group_on_issue(self, issue_key: str, value: str) -> bool:
         """Replace the sub-system group on a single issue."""
         return self.modify_sub_system_group_on_issue(issue_key, value, "replace")
+
+    @retry_with_backoff()
+    def get_assigned_team_options(self) -> List[Dict]:
+        """Get available Assigned Team options from Jira."""
+        # First, get field metadata to find the custom field options
+        url = f"{self.base_url}/rest/api/2/field"
+
+        try:
+            response = self.session.get(url)
+            if response.status_code == 429:
+                raise RateLimitError("Rate limited while fetching field metadata")
+            self._handle_response_errors(response)
+
+            fields = response.json()
+            assigned_team_field = None
+
+            for field in fields:
+                if field.get("id") == "customfield_12326540":
+                    assigned_team_field = field
+                    self.logger.debug(f"Found Assigned Team field: {field}")
+                    # Found the Assigned Team field, get its options
+                    if "allowedValues" in field:
+                        self.logger.debug(f"Found allowedValues: {field['allowedValues']}")
+                        return field["allowedValues"]
+                    break
+
+            if not assigned_team_field:
+                self.logger.debug("Assigned Team field customfield_12326540 not found in field list")
+                # Log all custom fields for debugging
+                custom_fields = [f for f in fields if f.get("id", "").startswith("customfield_")]
+                self.logger.debug(f"Found {len(custom_fields)} custom fields")
+                for cf in custom_fields[:10]:  # Log first 10 for debugging
+                    self.logger.debug(f"Custom field: {cf.get('id')} - {cf.get('name')}")
+
+            # If no allowedValues in field metadata, try alternative approaches
+
+            # Try getting field configuration directly
+            field_url = f"{self.base_url}/rest/api/2/customField/customfield_12326540/option"
+            self.logger.debug(f"Trying field options URL: {field_url}")
+            response = self.session.get(field_url)
+            self.logger.debug(f"Field options response: {response.status_code}")
+            if response.status_code == 200:
+                data = response.json()
+                self.logger.debug(f"Field options data: {data}")
+                return data.get("values", [])
+
+            # Try searching for existing tickets to extract possible values
+            self.logger.debug("Trying to extract values from existing tickets")
+            search_url = f"{self.base_url}/rest/api/2/search"
+            params = {
+                "jql": "project in (AUTOBU, VROOM) AND AssignedTeam is not EMPTY",
+                "fields": "customfield_12326540",
+                "maxResults": 50,
+            }
+
+            response = self.session.get(search_url, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                issues = data.get("issues", [])
+                self.logger.debug(f"Found {len(issues)} issues with Assigned Team values")
+
+                # Extract unique values with their IDs if available
+                unique_options = {}
+                for issue in issues:
+                    field_value = issue.get("fields", {}).get("customfield_12326540")
+                    if field_value:
+                        if isinstance(field_value, dict):
+                            value = field_value.get("value")
+                            option_id = field_value.get("id")
+                            if value:
+                                unique_options[value] = option_id
+                        elif isinstance(field_value, list):
+                            for item in field_value:
+                                if isinstance(item, dict):
+                                    value = item.get("value")
+                                    option_id = item.get("id")
+                                    if value:
+                                        unique_options[value] = option_id
+
+                self.logger.debug(f"Found unique options: {unique_options}")
+                # Convert to format similar to field options
+                result = []
+                for value in sorted(unique_options.keys()):
+                    option_dict = {"value": value}
+                    if unique_options[value]:
+                        option_dict["id"] = unique_options[value]
+                    result.append(option_dict)
+                return result
+
+            return []
+
+        except (RateLimitError, AuthenticationError, APIError):
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error fetching assigned team options: {e}")
+            return []
+
+    @retry_with_backoff()
+    def set_assigned_team_on_issue(self, issue_key: str, value: str) -> bool:
+        """Set the Assigned Team field on a single issue.
+
+        Args:
+            issue_key: The issue key to modify
+            value: The assigned team value to set (use empty string to clear)
+        """
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+
+        # First get current assigned team value to show what's changing
+        issue_data = self.get_issue(issue_key)
+        if not issue_data:
+            return False
+
+        fields = issue_data.get("fields", {})
+        current_field_value = fields.get("customfield_12326540")
+
+        # Get current value for comparison
+        current_value = None
+        if current_field_value:
+            if isinstance(current_field_value, dict):
+                current_value = current_field_value.get("value", str(current_field_value))
+            else:
+                current_value = str(current_field_value)
+
+        # Check if the value is already set
+        if current_value == value:
+            print(f"  {issue_key}: Assigned Team is already set to '{value}'")
+            return True
+
+        # Set new value - use single value format for assigned team
+        if value:
+            payload = {"fields": {"customfield_12326540": {"value": value}}}
+            action_verb = "Set"
+        else:
+            # Clear the field
+            payload = {"fields": {"customfield_12326540": None}}
+            action_verb = "Cleared"
+
+        try:
+            response = self.session.put(url, json=payload)
+            if response.status_code == 429:
+                raise RateLimitError(
+                    f"Rate limited while setting assigned team on {issue_key}"
+                )
+
+            if response.status_code == 204:  # Success
+                if value:
+                    print(f"  ✓ {issue_key}: {action_verb} assigned team to '{value}'")
+                else:
+                    print(f"  ✓ {issue_key}: {action_verb} assigned team")
+                return True
+            else:
+                self.logger.error(
+                    f"Failed to set assigned team on {issue_key}: HTTP {response.status_code}"
+                )
+                print(
+                    f"  ✗ {issue_key}: Failed to set assigned team (HTTP {response.status_code})"
+                )
+                if response.text:
+                    print(f"      Error details: {response.text}")
+                return False
+
+        except (RateLimitError, AuthenticationError, APIError):
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error setting assigned team on {issue_key}: {e}")
+            print(f"  ✗ {issue_key}: Error setting assigned team - {e}")
+            return False
 
     @retry_with_backoff()
     def get_available_transitions(self, issue_key: str) -> List[Dict]:
@@ -2164,6 +2332,168 @@ def action_list_sub_system_groups(args):
         sys.exit(1)
 
 
+def action_set_assigned_team(args):
+    """Set the Assigned Team field on an issue and optionally its descendants."""
+    try:
+        config = JiraConfig(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+
+    if not all([config.base_url, config.username, config.api_token]):
+        print(
+            "Error: Missing required configuration values (base_url, username, api_token)"
+        )
+        print("Please check your config file")
+        sys.exit(1)
+
+    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+
+    # Operation is always "set" for assigned team
+    operation_func = finder.set_assigned_team_on_issue
+    if args.value:
+        operation_name = f"setting assigned team to '{args.value}'"
+    else:
+        operation_name = "clearing assigned team"
+
+    try:
+        if args.include_children:
+            print(f"Finding all descendants of {args.issue_key}...")
+            all_issues = finder.find_descendants(args.issue_key)
+            if not all_issues:
+                print(f"No issues found for {args.issue_key}")
+                return
+
+            # Filter out closed issues
+            open_issues = [
+                issue
+                for issue in all_issues
+                if not finder.is_issue_closed(issue.status)
+            ]
+            closed_issues = [
+                issue for issue in all_issues if finder.is_issue_closed(issue.status)
+            ]
+
+            if not open_issues:
+                print(
+                    f"No open issues found for {args.issue_key} (all {len(closed_issues)} issues are closed)"
+                )
+                return
+
+            print(
+                f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
+            )
+            print("Open issues that will be affected:")
+            print("=" * 50)
+            finder.print_hierarchy(open_issues, show_labels=True, show_assigned_team=True)
+
+            if closed_issues:
+                print(f"\nSkipping {len(closed_issues)} closed issues:")
+                for issue in closed_issues:
+                    print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
+
+            print(f"\nThis will perform '{operation_name}' on {len(open_issues)} open issues.")
+            target_issues = open_issues
+
+        else:
+            # Just the single issue
+            issue_data = finder.get_issue(args.issue_key)
+            if not issue_data:
+                print(f"Issue {args.issue_key} not found")
+                return
+
+            fields = issue_data.get("fields", {})
+            current_assigned_team = fields.get("customfield_12326540")
+            issue_status = fields.get("status", {}).get("name", "")
+
+            # Check if single issue is closed
+            if finder.is_issue_closed(issue_status):
+                print(
+                    f"Issue {args.issue_key} is closed (Status: {issue_status}). Skipping assigned team modification."
+                )
+                return
+
+            # Display current assigned team
+            if current_assigned_team:
+                if isinstance(current_assigned_team, dict):
+                    current_value = current_assigned_team.get("value", str(current_assigned_team))
+                else:
+                    current_value = str(current_assigned_team)
+                print(f"Current Assigned Team: {current_value}")
+            else:
+                print("Current Assigned Team: None")
+
+            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
+            print(f"Status: {issue_status}")
+            print(f"\nThis will perform '{operation_name}' on this issue only.")
+            target_issues = [
+                finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
+            ]
+
+        # Use bulk operation
+        finder._perform_bulk_operation(
+            target_issues,
+            operation_name,
+            operation_func,
+            args.value,
+            show_assigned_team=True,
+        )
+
+    except (AuthenticationError, APIError, RateLimitError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def action_list_assigned_teams(args):
+    """List available Assigned Team options."""
+    try:
+        config = JiraConfig(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+
+    if not all([config.base_url, config.username, config.api_token]):
+        print(
+            "Error: Missing required configuration values (base_url, username, api_token)"
+        )
+        print("Please check your config file")
+        sys.exit(1)
+
+    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+
+    try:
+        print("Fetching available Assigned Team options...")
+        options = finder.get_assigned_team_options()
+
+        if not options:
+            print("No Assigned Team options found or unable to fetch options.")
+            print("This might be due to permissions or field configuration.")
+            return
+
+        print(f"\nAvailable Assigned Team options ({len(options)}):")
+        print("=" * 50)
+        for option in options:
+            if isinstance(option, dict):
+                value = option.get("value", "")
+                option_id = option.get("id")
+                disabled = option.get("disabled", False)
+                status = " (disabled)" if disabled else ""
+
+                # Only show ID if it exists and is not empty
+                if option_id:
+                    print(f"  {value}{status} (ID: {option_id})")
+                else:
+                    print(f"  {value}{status}")
+            else:
+                print(f"  {option}")
+
+    except (AuthenticationError, APIError, RateLimitError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Jira descendants finder")
     parser.add_argument(
@@ -2314,6 +2644,31 @@ def main() -> None:
         help="List available Sub-System group options"
     )
     list_sub_system_groups_parser.set_defaults(func=action_list_sub_system_groups)
+
+    # set-assigned-team action
+    set_assigned_team_parser = subparsers.add_parser(
+        "set-assigned-team",
+        help="Set the Assigned Team field on an issue and optionally its descendants"
+    )
+    set_assigned_team_parser.add_argument(
+        "issue_key", help="The issue key to modify (e.g., PROJ-123)"
+    )
+    set_assigned_team_parser.add_argument(
+        "value", help="The assigned team value to set (use empty string to clear)"
+    )
+    set_assigned_team_parser.add_argument(
+        "--include-children",
+        action="store_true",
+        help="Also set assigned team on all descendant issues",
+    )
+    set_assigned_team_parser.set_defaults(func=action_set_assigned_team)
+
+    # list-assigned-teams action
+    list_assigned_teams_parser = subparsers.add_parser(
+        "list-assigned-teams",
+        help="List available Assigned Team options"
+    )
+    list_assigned_teams_parser.set_defaults(func=action_list_assigned_teams)
 
     args = parser.parse_args()
 
