@@ -1162,13 +1162,8 @@ class JiraDescendantFinder:
         else:
             raise ValueError(f"Invalid operation: {operation}")
 
-        # If field is single-select, only take first value
-        if len(new_values) > 1:
-            # Check if field allows multiple values by trying to set multiple
-            # For now, assume single-select and use first value
-            new_values = new_values[:1] if new_values else []
-
-        payload = {"fields": {"customfield_12320851": new_values[0] if new_values else None}}
+        # The Sub-System Group field expects an array format
+        payload = {"fields": {"customfield_12320851": new_values if new_values else None}}
 
         try:
             response = self.session.put(url, json=payload)
