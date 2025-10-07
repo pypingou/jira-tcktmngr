@@ -2127,7 +2127,24 @@ def action_find_descendants(args):
         print(f"python jira_descendants.py find {args.issue_key} --debug")
         return
 
-    print(f"\nFound {len(descendants)} issues:")
+    # Filter to only open issues if requested
+    if args.open_only:
+        total_count = len(descendants)
+        open_descendants = [
+            issue for issue in descendants if not finder.is_issue_closed(issue.status)
+        ]
+        closed_count = total_count - len(open_descendants)
+
+        if not open_descendants:
+            print(f"No open descendants found for {args.issue_key}")
+            print(f"Found {total_count} total issues, but all {closed_count} are closed/done")
+            return
+
+        descendants = open_descendants
+        print(f"\nFound {len(descendants)} open issues (filtered from {total_count} total, excluding {closed_count} closed):")
+    else:
+        print(f"\nFound {len(descendants)} issues:")
+
     print("=" * 50)
 
     finder.print_hierarchy(
@@ -2603,6 +2620,9 @@ def main() -> None:
     )
     find_parser.add_argument(
         "--assigned-team", action="store_true", help="Show assigned team in output"
+    )
+    find_parser.add_argument(
+        "--open-only", action="store_true", help="Show only open tickets (exclude closed/done tickets)"
     )
     find_parser.set_defaults(func=action_find_descendants)
 
