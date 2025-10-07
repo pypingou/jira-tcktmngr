@@ -903,6 +903,7 @@ class JiraDescendantFinder:
         operation_func,
         *args,
         confirm: bool = True,
+        show_sub_system_group: bool = False,
     ) -> int:
         """Perform a bulk operation on multiple issues with confirmation."""
         if not issues:
@@ -912,7 +913,7 @@ class JiraDescendantFinder:
         # Show affected tickets
         print(f"\nAFFECTED TICKETS ({len(issues)}):")
         print("=" * 50)
-        self.print_hierarchy(issues, show_labels=True)
+        self.print_hierarchy(issues, show_labels=True, show_sub_system_group=show_sub_system_group)
 
         if confirm:
             response = input(
@@ -2061,7 +2062,13 @@ def action_edit_sub_system_group(args):
 
             # Display current sub-system group
             if current_sub_system_group:
-                if isinstance(current_sub_system_group, dict):
+                if isinstance(current_sub_system_group, list) and current_sub_system_group:
+                    # Handle list of dictionaries (common for multi-select fields)
+                    if isinstance(current_sub_system_group[0], dict):
+                        current_value = current_sub_system_group[0].get("value", str(current_sub_system_group[0]))
+                    else:
+                        current_value = str(current_sub_system_group[0])
+                elif isinstance(current_sub_system_group, dict):
                     current_value = current_sub_system_group.get("value", str(current_sub_system_group))
                 else:
                     current_value = str(current_sub_system_group)
@@ -2082,6 +2089,7 @@ def action_edit_sub_system_group(args):
             operation_name,
             operation_func,
             args.value,
+            show_sub_system_group=True,
         )
 
     except (AuthenticationError, APIError, RateLimitError) as e:
