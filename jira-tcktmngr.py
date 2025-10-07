@@ -254,6 +254,7 @@ class JiraIssue:
     labels: List[str]
     level: int = 0
     sub_system_group: Optional[str] = None
+    assigned_team: Optional[str] = None
 
 
 class JiraConfig:
@@ -792,6 +793,22 @@ class JiraDescendantFinder:
                     sub_system_group = str(value)
                 break
 
+        # Extract assigned team field - customfield_12326540 is the Assigned-team field
+        assigned_team = None
+        assigned_team_value = fields.get("customfield_12326540")
+        if assigned_team_value:
+            # Handle different possible formats (string, dict with value/name, list of dicts, etc.)
+            if isinstance(assigned_team_value, list) and assigned_team_value:
+                # Handle list of dictionaries (common for multi-select fields)
+                if isinstance(assigned_team_value[0], dict):
+                    assigned_team = assigned_team_value[0].get("value") or assigned_team_value[0].get("name") or str(assigned_team_value[0])
+                else:
+                    assigned_team = str(assigned_team_value[0])
+            elif isinstance(assigned_team_value, dict):
+                assigned_team = assigned_team_value.get("value") or assigned_team_value.get("name") or str(assigned_team_value)
+            else:
+                assigned_team = str(assigned_team_value)
+
         return JiraIssue(
             key=issue_key,
             summary=fields.get("summary", ""),
@@ -800,6 +817,7 @@ class JiraDescendantFinder:
             labels=fields.get("labels", []),
             level=level,
             sub_system_group=sub_system_group,
+            assigned_team=assigned_team,
         )
 
     def _find_subtask_children(self, fields: Dict, level: int) -> List[JiraIssue]:
@@ -1348,6 +1366,7 @@ class JiraDescendantFinder:
         show_status: bool = False,
         show_labels: bool = False,
         show_sub_system_group: bool = False,
+        show_assigned_team: bool = False,
     ) -> None:
         """Print the issue hierarchy in a tree format with color coding."""
         if not issues:
@@ -1392,6 +1411,8 @@ class JiraDescendantFinder:
                 details.append(f"Labels: {colored_labels}")
             if show_sub_system_group and issue.sub_system_group:
                 details.append(f"Sub-System Group: {Colors.CYAN}{issue.sub_system_group}{Colors.RESET}")
+            if show_assigned_team and issue.assigned_team:
+                details.append(f"Assigned Team: {Colors.CYAN}{issue.assigned_team}{Colors.RESET}")
 
             details_str = (
                 f"    {Colors.DIM}[{', '.join(details)}]{Colors.RESET}"
@@ -1414,6 +1435,7 @@ class JiraDescendantFinder:
                 "labels": issue.labels,
                 "level": issue.level,
                 "sub_system_group": issue.sub_system_group,
+                "assigned_team": issue.assigned_team,
             }
             for issue in issues
         ]
@@ -1946,6 +1968,7 @@ def action_find_descendants(args):
         show_status=args.status,
         show_labels=args.labels,
         show_sub_system_group=args.sub_system_group,
+        show_assigned_team=args.assigned_team,
     )
 
     if args.export:
@@ -2247,6 +2270,9 @@ def main() -> None:
     )
     find_parser.add_argument(
         "--sub-system-group", action="store_true", help="Show sub-system group in output"
+    )
+    find_parser.add_argument(
+        "--assigned-team", action="store_true", help="Show assigned team in output"
     )
     find_parser.set_defaults(func=action_find_descendants)
 
