@@ -257,6 +257,19 @@ class JiraIssue:
     assigned_team: Optional[str] = None
 
 
+@dataclass
+class OperationConfig:
+    """Configuration for bulk operations."""
+    operation_type: str  # 'label_add', 'label_remove', 'close', 'reopen', 'sub_system_group', 'assigned_team'
+    operation_name: str  # Human-readable operation description
+    operation_func: callable  # Function to call for each issue
+    operation_args: List  # Arguments to pass to operation_func
+    show_labels: bool = False
+    show_sub_system_group: bool = False
+    show_assigned_team: bool = False
+    sub_system_operation: Optional[str] = None  # For sub_system_group: 'add', 'remove', 'replace'
+
+
 class JiraConfig:
     def __init__(self, config_path: Optional[str] = None) -> None:
         if config_path is None:
@@ -921,6 +934,7 @@ class JiraDescendantFinder:
         operation_func,
         *args,
         confirm: bool = True,
+        show_labels: bool = False,
         show_sub_system_group: bool = False,
         show_assigned_team: bool = False,
         issues_needing_update: List[str] = None,
@@ -940,7 +954,7 @@ class JiraDescendantFinder:
         print("=" * 50)
         self.print_hierarchy(
             issues,
-            show_labels=True,
+            show_labels=show_labels,
             show_sub_system_group=show_sub_system_group,
             show_assigned_team=show_assigned_team,
             issues_needing_update=issues_needing_update
@@ -1692,6 +1706,200 @@ class JiraDescendantFinder:
         print(f"Exported {len(issues)} issues to {filename}")
 
 
+def setup_jira_finder(config_path: Optional[str] = None) -> JiraDescendantFinder:
+    """Set up JiraDescendantFinder with config validation. Eliminates config duplication."""
+    try:
+        config = JiraConfig(config_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+
+    if not all([config.base_url, config.username, config.api_token]):
+        print(
+            "Error: Missing required configuration values (base_url, username, api_token)"
+        )
+        print("Please check your config file")
+        sys.exit(1)
+
+    return JiraDescendantFinder(config.base_url, config.username, config.api_token)
+
+
+def filter_and_analyze_issues(
+    finder: JiraDescendantFinder,
+    issue_key: str,
+    include_children: bool,
+    operation_config: OperationConfig
+) -> tuple[List[JiraIssue], List[str]]:
+    """Find and filter issues, returning target issues and those needing updates."""
+    if include_children:
+        print(f"Finding all descendants of {issue_key}...")
+        all_issues = finder.find_descendants(issue_key)
+        if not all_issues:
+            print(f"No issues found for {issue_key}")
+            sys.exit(0)
+
+        # Filter out closed issues
+        open_issues = [
+            issue for issue in all_issues
+            if not finder.is_issue_closed(issue.status)
+        ]
+        closed_issues = [
+            issue for issue in all_issues
+            if finder.is_issue_closed(issue.status)
+        ]
+
+        if not open_issues:
+            print(
+                f"No open issues found for {issue_key} "
+                f"(all {len(closed_issues)} issues are closed)"
+            )
+            sys.exit(0)
+
+        # Determine which issues actually need updates
+        issues_needing_update = finder.get_issues_needing_update(
+            open_issues,
+            operation_config.operation_type,
+            operation_config.operation_args[0] if operation_config.operation_args else None,
+            operation_config.sub_system_operation
+        )
+
+        # Display status
+        print(
+            f"\nFound {len(all_issues)} total issues "
+            f"({len(open_issues)} open, {len(closed_issues)} closed):"
+        )
+        print("Open issues that will be affected:")
+        print("=" * 50)
+
+        finder.print_hierarchy(
+            open_issues,
+            show_labels=operation_config.show_labels,
+            show_sub_system_group=operation_config.show_sub_system_group,
+            show_assigned_team=operation_config.show_assigned_team,
+            issues_needing_update=issues_needing_update
+        )
+
+        if closed_issues:
+            print(f"\nSkipping {len(closed_issues)} closed issues:")
+            for issue in closed_issues:
+                print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
+
+        return open_issues, issues_needing_update
+
+    else:
+        # Single issue handling
+        issue_data = finder.get_issue(issue_key)
+        if not issue_data:
+            print(f"Issue {issue_key} not found")
+            sys.exit(1)
+
+        fields = issue_data.get("fields", {})
+        issue_status = fields.get("status", {}).get("name", "")
+
+        # Check if single issue is closed
+        if finder.is_issue_closed(issue_status):
+            print(
+                f"Issue {issue_key} is closed (Status: {issue_status}). "
+                "Skipping operation."
+            )
+            sys.exit(0)
+
+        target_issues = [finder._create_jira_issue_from_data(issue_key, issue_data, 0)]
+        issues_needing_update = finder.get_issues_needing_update(
+            target_issues,
+            operation_config.operation_type,
+            operation_config.operation_args[0] if operation_config.operation_args else None,
+            operation_config.sub_system_operation
+        )
+
+        print(f"Issue: {issue_key}: {fields.get('summary', '')}")
+        print(f"Status: {issue_status}")
+        print(f"\nThis will perform '{operation_config.operation_name}' on this issue only.")
+
+        return target_issues, issues_needing_update
+
+
+def display_bulk_operation_status(
+    target_issues: List[JiraIssue],
+    issues_needing_update: List[str],
+    operation_config: OperationConfig,
+    finder: JiraDescendantFinder,
+    is_single_issue: bool = False
+) -> None:
+    """Display operation status with color coding and explanations."""
+    if is_single_issue:
+        print(f"\nAFFECTED TICKETS (1):")
+        print("=" * 50)
+        finder.print_hierarchy(
+            target_issues,
+            show_labels=operation_config.show_labels,
+            show_sub_system_group=operation_config.show_sub_system_group,
+            show_assigned_team=operation_config.show_assigned_team,
+            issues_needing_update=issues_needing_update
+        )
+
+    # Show explanation
+    already_correct = len(target_issues) - len(issues_needing_update)
+    if already_correct > 0:
+        print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct value")
+
+    if len(issues_needing_update) > 0:
+        print(
+            f"\nThis will perform '{operation_config.operation_name}' on "
+            f"{len(issues_needing_update)} issue(s)"
+            + (f" (out of {len(target_issues)} open issues)" if not is_single_issue else "")
+            + "."
+        )
+    else:
+        print(f"\nAll issues already have the correct value. No changes needed.")
+
+
+def handle_bulk_issue_operation(
+    issue_key: str,
+    include_children: bool,
+    operation_config: OperationConfig,
+    config_path: Optional[str] = None
+) -> None:
+    """Generic handler for all bulk issue operations. Eliminates ~80% duplication."""
+    logger = logging.getLogger("jira-tcktmngr")
+
+    try:
+        # Setup (eliminates config duplication)
+        finder = setup_jira_finder(config_path)
+
+        # Filter and analyze (eliminates bulk vs single logic duplication)
+        target_issues, issues_needing_update = filter_and_analyze_issues(
+            finder, issue_key, include_children, operation_config
+        )
+
+        # Display status (eliminates status display duplication)
+        display_bulk_operation_status(
+            target_issues,
+            issues_needing_update,
+            operation_config,
+            finder,
+            is_single_issue=not include_children
+        )
+
+        # Perform bulk operation (reuses existing logic)
+        finder._perform_bulk_operation(
+            target_issues,
+            operation_config.operation_name,
+            operation_config.operation_func,
+            *operation_config.operation_args,
+            show_labels=operation_config.show_labels,
+            show_sub_system_group=operation_config.show_sub_system_group,
+            show_assigned_team=operation_config.show_assigned_team,
+            issues_needing_update=issues_needing_update,
+        )
+
+    except (AuthenticationError, APIError, RateLimitError) as e:
+        logger.error(f"API error in {operation_config.operation_type}: {e}")
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def create_sample_config(config_path: Optional[str] = None) -> None:
     """Create a sample config file."""
     if config_path is None:
@@ -1754,494 +1962,85 @@ def action_test_auth(args) -> None:
 
 def action_add_label(args) -> None:
     """Add a label to an issue and optionally its descendants."""
-    logger = logging.getLogger("jira-tcktmngr")
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
 
-    try:
-        config = JiraConfig(args.config)
-    except FileNotFoundError as e:
-        logger.error(f"Config file not found: {e}")
-        print(f"Error: {e}")
-        print("Use 'create-config' action to create a sample config file.")
-        sys.exit(1)
+    operation_config = OperationConfig(
+        operation_type="label_add",
+        operation_name=f"adding label '{args.label}'",
+        operation_func=finder.add_label_to_issue,
+        operation_args=[args.label],
+        show_labels=True
+    )
 
-    if not all([config.base_url, config.username, config.api_token]):
-        logger.error("Missing required configuration values")
-        print(
-            "Error: Missing required configuration values (base_url, username, api_token)"
-        )
-        print("Please check your config file")
-        sys.exit(1)
-
-    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
-
-    try:
-        if args.include_children:
-            logger.info(f"Finding all descendants of {args.issue_key}")
-            print(f"Finding all descendants of {args.issue_key}...")
-            all_issues = finder.find_descendants(args.issue_key)
-            if not all_issues:
-                print(f"No issues found for {args.issue_key}")
-                return
-
-            # Filter out closed issues
-            open_issues = [
-                issue
-                for issue in all_issues
-                if not finder.is_issue_closed(issue.status)
-            ]
-            closed_issues = [
-                issue for issue in all_issues if finder.is_issue_closed(issue.status)
-            ]
-
-            if not open_issues:
-                print(
-                    f"No open issues found for {args.issue_key} (all {len(closed_issues)} issues are closed)"
-                )
-                return
-
-            # Determine which issues actually need updates
-            issues_needing_update = finder.get_issues_needing_update(
-                open_issues, "label_add", args.label
-            )
-
-            logger.info(
-                f"Found {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed)"
-            )
-            print(
-                f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
-            )
-            print("Open issues that will be affected:")
-            print("=" * 50)
-            finder.print_hierarchy(
-                open_issues,
-                show_labels=True,
-                issues_needing_update=issues_needing_update
-            )
-
-            if closed_issues:
-                print(f"\nSkipping {len(closed_issues)} closed issues:")
-                for issue in closed_issues:
-                    print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
-
-            already_correct = len(open_issues) - len(issues_needing_update)
-            if already_correct > 0:
-                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has this label")
-
-            if len(issues_needing_update) > 0:
-                print(f"\nThis will add label '{args.label}' to {len(issues_needing_update)} issues (out of {len(open_issues)} open issues).")
-            else:
-                print(f"\nAll {len(open_issues)} open issues already have the label '{args.label}'. No changes needed.")
-            target_issues = open_issues
-
-        else:
-            # Just the single issue
-            issue_data = finder.get_issue(args.issue_key)
-            if not issue_data:
-                print(f"Issue {args.issue_key} not found")
-                return
-
-            fields = issue_data.get("fields", {})
-            current_labels = fields.get("labels", [])
-            issue_status = fields.get("status", {}).get("name", "")
-
-            # Check if single issue is closed
-            if finder.is_issue_closed(issue_status):
-                print(
-                    f"Issue {args.issue_key} is closed (Status: {issue_status}). Skipping label addition."
-                )
-                return
-
-            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-            print(f"Current labels: {current_labels if current_labels else 'None'}")
-            print(f"Status: {issue_status}")
-            print(f"\nThis will add label '{args.label}' to this issue only.")
-            target_issues = [
-                finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
-            ]
-
-        # Use bulk operation
-        finder._perform_bulk_operation(
-            target_issues,
-            f"adding label '{args.label}'",
-            finder.add_label_to_issue,
-            args.label,
-            issues_needing_update=issues_needing_update,
-        )
-
-    except (AuthenticationError, APIError, RateLimitError) as e:
-        logger.error(f"API error in add_label: {e}")
-        print(f"Error: {e}")
-        sys.exit(1)
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
+    )
 
 
 def action_remove_label(args):
     """Remove a label from an issue and optionally its descendants."""
-    try:
-        config = JiraConfig(args.config)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Use 'create-config' action to create a sample config file.")
-        sys.exit(1)
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
 
-    if not all([config.base_url, config.username, config.api_token]):
-        print(
-            "Error: Missing required configuration values (base_url, username, api_token)"
-        )
-        print("Please check your config file")
-        sys.exit(1)
+    operation_config = OperationConfig(
+        operation_type="label_remove",
+        operation_name=f"removing label '{args.label}'",
+        operation_func=finder.remove_label_from_issue,
+        operation_args=[args.label],
+        show_labels=True
+    )
 
-    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
-
-    if args.include_children:
-        print(f"Finding all descendants of {args.issue_key}...")
-        all_issues = finder.find_descendants(args.issue_key)
-        if not all_issues:
-            print(f"No issues found for {args.issue_key}")
-            return
-
-        # Filter to only issues that actually have the label
-        issues_with_label = [
-            issue for issue in all_issues if args.label in issue.labels
-        ]
-
-        if not issues_with_label:
-            print(f"No issues found with label '{args.label}'")
-            return
-
-        # Filter out closed issues from those that have the label
-        open_issues_with_label = [
-            issue
-            for issue in issues_with_label
-            if not finder.is_issue_closed(issue.status)
-        ]
-        closed_issues_with_label = [
-            issue for issue in issues_with_label if finder.is_issue_closed(issue.status)
-        ]
-
-        if not open_issues_with_label:
-            print(
-                f"No open issues found with label '{args.label}' (all {len(closed_issues_with_label)} issues with the label are closed)"
-            )
-            return
-
-        # Determine which issues actually need updates
-        issues_needing_update = finder.get_issues_needing_update(
-            open_issues_with_label, "label_remove", args.label
-        )
-
-        print(
-            f"\nFound {len(issues_with_label)} total issues with label '{args.label}' ({len(open_issues_with_label)} open, {len(closed_issues_with_label)} closed):"
-        )
-        print("Open issues that will be affected:")
-        print("=" * 50)
-        finder.print_hierarchy(
-            open_issues_with_label,
-            show_labels=True,
-            issues_needing_update=issues_needing_update
-        )
-
-        if closed_issues_with_label:
-            print(
-                f"\nSkipping {len(closed_issues_with_label)} closed issues with the label:"
-            )
-            for issue in closed_issues_with_label:
-                print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
-
-        already_correct = len(open_issues_with_label) - len(issues_needing_update)
-        if already_correct > 0:
-            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct label value")
-
-        if len(issues_needing_update) > 0:
-            print(f"\nThis will remove label '{args.label}' from {len(issues_needing_update)} issues (out of {len(open_issues_with_label)} open issues).")
-        else:
-            print(f"\nAll {len(open_issues_with_label)} open issues already have the correct label value. No changes needed.")
-        all_issues = open_issues_with_label
-
-    else:
-        # Just the single issue
-        issue_data = finder.get_issue(args.issue_key)
-        if not issue_data:
-            print(f"Issue {args.issue_key} not found")
-            return
-
-        fields = issue_data.get("fields", {})
-        current_labels = fields.get("labels", [])
-        issue_status = fields.get("status", {}).get("name", "")
-
-        if args.label not in current_labels:
-            print(f"Issue {args.issue_key} does not have label '{args.label}'")
-            print(f"Current labels: {current_labels if current_labels else 'None'}")
-            return
-
-        # Check if single issue is closed
-        if finder.is_issue_closed(issue_status):
-            print(
-                f"Issue {args.issue_key} is closed (Status: {issue_status}). Skipping label removal."
-            )
-            return
-
-        # Create JiraIssue object for consistency with bulk operation pattern
-        all_issues = [
-            JiraIssue(
-                key=args.issue_key,
-                summary=fields.get("summary", ""),
-                issue_type=fields.get("issuetype", {}).get("name", ""),
-                status=issue_status,
-                labels=current_labels,
-                level=0,
-            )
-        ]
-        # Check if the single issue actually needs an update
-        issues_needing_update = finder.get_issues_needing_update(
-            all_issues, "label_remove", args.label
-        )
-
-        print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-        print(f"Current labels: {current_labels}")
-        print(f"Status: {issue_status}")
-        print(f"\nThis will remove label '{args.label}' from this issue only.")
-
-        # Show affected tickets with color coding
-        print(f"\nAFFECTED TICKETS (1):")
-        print("=" * 50)
-        finder.print_hierarchy(
-            all_issues,
-            show_labels=True,
-            issues_needing_update=issues_needing_update
-        )
-
-        # Show explanation if needed
-        already_correct = len(all_issues) - len(issues_needing_update)
-        if already_correct > 0:
-            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct label value")
-
-        if len(issues_needing_update) > 0:
-            print(f"\nThis will remove label '{args.label}' from {len(issues_needing_update)} issue(s).")
-        else:
-            print(f"\nAll issues already have the correct label value. No changes needed.")
-
-    # Use bulk operation
-    finder._perform_bulk_operation(
-        all_issues,
-        f"removing label '{args.label}'",
-        finder.remove_label_from_issue,
-        args.label,
-        issues_needing_update=issues_needing_update,
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
     )
 
 
 def action_close_ticket(args):
     """Close a ticket and optionally its descendants."""
-    try:
-        config = JiraConfig(args.config)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Use 'create-config' action to create a sample config file.")
-        sys.exit(1)
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
 
-    if not all([config.base_url, config.username, config.api_token]):
-        print(
-            "Error: Missing required configuration values (base_url, username, api_token)"
-        )
-        print("Please check your config file")
-        sys.exit(1)
+    operation_config = OperationConfig(
+        operation_type="close",
+        operation_name=f"closing tickets with resolution '{args.resolution}'",
+        operation_func=finder.close_ticket,
+        operation_args=[args.resolution],
+        show_labels=True
+    )
 
-    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
-
-    if args.include_children:
-        print(f"Finding all descendants of {args.issue_key}...")
-        all_issues = finder.find_descendants(args.issue_key)
-        if not all_issues:
-            print(f"No issues found for {args.issue_key}")
-            return
-
-        # Filter to only open issues (skip already closed ones)
-        open_issues = [
-            issue for issue in all_issues if not finder.is_issue_closed(issue.status)
-        ]
-        closed_issues = [
-            issue for issue in all_issues if finder.is_issue_closed(issue.status)
-        ]
-
-        if not open_issues:
-            print(
-                f"No open issues found for {args.issue_key} (all {len(closed_issues)} issues are already closed)"
-            )
-            return
-
-        # Determine which issues actually need updates
-        issues_needing_update = finder.get_issues_needing_update(
-            open_issues, "close"
-        )
-
-        print(
-            f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
-        )
-        print("Open issues that will be affected:")
-        print("=" * 50)
-        finder.print_hierarchy(
-            open_issues,
-            show_labels=True,
-            issues_needing_update=issues_needing_update
-        )
-
-        if closed_issues:
-            print(f"\nSkipping {len(closed_issues)} already closed issues:")
-            for issue in closed_issues:
-                print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
-
-        already_correct = len(open_issues) - len(issues_needing_update)
-        if already_correct > 0:
-            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct status")
-
-        if len(issues_needing_update) > 0:
-            print(f"\nThis will close {len(issues_needing_update)} issues (out of {len(open_issues)} open issues) with resolution '{args.resolution}'.")
-        else:
-            print(f"\nAll {len(open_issues)} open issues already have the correct status. No changes needed.")
-        all_issues = open_issues
-
-    else:
-        # Just the single issue
-        issue_data = finder.get_issue(args.issue_key)
-        if not issue_data:
-            print(f"Issue {args.issue_key} not found")
-            return
-
-        fields = issue_data.get("fields", {})
-        issue_status = fields.get("status", {}).get("name", "")
-
-        # Check if single issue is already closed
-        if finder.is_issue_closed(issue_status):
-            print(f"Issue {args.issue_key} is already closed (Status: {issue_status}).")
-            return
-
-        # Create JiraIssue object for consistency with bulk operation pattern
-        all_issues = [
-            JiraIssue(
-                key=args.issue_key,
-                summary=fields.get("summary", ""),
-                issue_type=fields.get("issuetype", {}).get("name", ""),
-                status=issue_status,
-                labels=fields.get("labels", []),
-                level=0,
-            )
-        ]
-        # Check if the single issue actually needs an update
-        issues_needing_update = finder.get_issues_needing_update(
-            all_issues, "close"
-        )
-
-        print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-        print(f"Status: {issue_status}")
-        print(f"\nThis will close this issue with resolution '{args.resolution}'.")
-
-        # Show affected tickets with color coding
-        print(f"\nAFFECTED TICKETS (1):")
-        print("=" * 50)
-        finder.print_hierarchy(
-            all_issues,
-            show_labels=True,
-            issues_needing_update=issues_needing_update
-        )
-
-        # Show explanation if needed
-        already_correct = len(all_issues) - len(issues_needing_update)
-        if already_correct > 0:
-            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct status")
-
-        if len(issues_needing_update) > 0:
-            print(f"\nThis will close {len(issues_needing_update)} issue(s) with resolution '{args.resolution}'.")
-        else:
-            print(f"\nAll issues already have the correct status. No changes needed.")
-
-    # Use bulk operation
-    finder._perform_bulk_operation(
-        all_issues,
-        f"closing tickets with resolution '{args.resolution}'",
-        finder.close_ticket,
-        args.resolution,
-        issues_needing_update=issues_needing_update,
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
     )
 
 
 def action_reopen_ticket(args):
     """Reopen a single ticket."""
-    try:
-        config = JiraConfig(args.config)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Use 'create-config' action to create a sample config file.")
-        sys.exit(1)
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
 
-    if not all([config.base_url, config.username, config.api_token]):
-        print(
-            "Error: Missing required configuration values (base_url, username, api_token)"
-        )
-        print("Please check your config file")
-        sys.exit(1)
-
-    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
-
-    # Get the issue details
-    issue_data = finder.get_issue(args.issue_key)
-    if not issue_data:
-        print(f"Issue {args.issue_key} not found")
-        return
-
-    fields = issue_data.get("fields", {})
-    issue_status = fields.get("status", {}).get("name", "")
-
-    # Check if issue is already open
-    if not finder.is_issue_closed(issue_status):
-        print(f"Issue {args.issue_key} is already open (Status: {issue_status}).")
-        return
-
-    # Create JiraIssue object for consistency with bulk operation pattern
-    target_issues = [
-        JiraIssue(
-            key=args.issue_key,
-            summary=fields.get("summary", ""),
-            issue_type=fields.get("issuetype", {}).get("name", ""),
-            status=issue_status,
-            labels=fields.get("labels", []),
-            level=0,
-        )
-    ]
-
-    # Check if the issue actually needs an update
-    issues_needing_update = finder.get_issues_needing_update(
-        target_issues, "reopen"
+    operation_config = OperationConfig(
+        operation_type="reopen",
+        operation_name="reopening tickets",
+        operation_func=finder.reopen_ticket,
+        operation_args=[],
+        show_labels=True
     )
 
-    print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-    print(f"Current Status: {issue_status}")
-    print(f"\nThis will reopen this ticket.")
-
-    # Show affected tickets with color coding
-    print(f"\nAFFECTED TICKETS (1):")
-    print("=" * 50)
-    finder.print_hierarchy(
-        target_issues,
-        show_labels=True,
-        issues_needing_update=issues_needing_update
-    )
-
-    # Show explanation if needed
-    already_correct = len(target_issues) - len(issues_needing_update)
-    if already_correct > 0:
-        print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct status")
-
-    if len(issues_needing_update) > 0:
-        print(f"\nThis will reopen {len(issues_needing_update)} issue(s).")
-    else:
-        print(f"\nAll issues already have the correct status. No changes needed.")
-
-    # Use bulk operation for consistency
-    finder._perform_bulk_operation(
-        target_issues,
-        "reopening tickets",
-        finder.reopen_ticket,
-        issues_needing_update=issues_needing_update,
+    handle_bulk_issue_operation(
+        args.issue_key,
+        False,  # Single ticket only - no include_children for reopen
+        operation_config,
+        args.config
     )
 
 
@@ -2351,21 +2150,8 @@ def action_find_descendants(args):
 
 def action_edit_sub_system_group(args):
     """Edit the Sub-System group field on an issue and optionally its descendants."""
-    try:
-        config = JiraConfig(args.config)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Use 'create-config' action to create a sample config file.")
-        sys.exit(1)
-
-    if not all([config.base_url, config.username, config.api_token]):
-        print(
-            "Error: Missing required configuration values (base_url, username, api_token)"
-        )
-        print("Please check your config file")
-        sys.exit(1)
-
-    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
 
     # Determine operation and method
     if args.operation == "append":
@@ -2381,142 +2167,22 @@ def action_edit_sub_system_group(args):
         print(f"Error: Invalid operation '{args.operation}'")
         sys.exit(1)
 
-    try:
-        if args.include_children:
-            print(f"Finding all descendants of {args.issue_key}...")
-            all_issues = finder.find_descendants(args.issue_key)
-            if not all_issues:
-                print(f"No issues found for {args.issue_key}")
-                return
+    operation_config = OperationConfig(
+        operation_type="sub_system_group",
+        operation_name=operation_name,
+        operation_func=operation_func,
+        operation_args=[args.value],
+        show_labels=True,
+        show_sub_system_group=True,
+        sub_system_operation=args.operation
+    )
 
-            # Filter out closed issues
-            open_issues = [
-                issue
-                for issue in all_issues
-                if not finder.is_issue_closed(issue.status)
-            ]
-            closed_issues = [
-                issue for issue in all_issues if finder.is_issue_closed(issue.status)
-            ]
-
-            if not open_issues:
-                print(
-                    f"No open issues found for {args.issue_key} (all {len(closed_issues)} issues are closed)"
-                )
-                return
-
-            # Determine which issues actually need updates
-            issues_needing_update = finder.get_issues_needing_update(
-                open_issues, "sub_system_group", args.value, args.operation
-            )
-
-            print(
-                f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
-            )
-            print("Open issues that will be affected:")
-            print("=" * 50)
-            finder.print_hierarchy(
-                open_issues,
-                show_labels=True,
-                show_sub_system_group=True,
-                issues_needing_update=issues_needing_update
-            )
-
-            if closed_issues:
-                print(f"\nSkipping {len(closed_issues)} closed issues:")
-                for issue in closed_issues:
-                    print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
-
-            already_correct = len(open_issues) - len(issues_needing_update)
-            if already_correct > 0:
-                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct sub-system group value")
-
-            if len(issues_needing_update) > 0:
-                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issues (out of {len(open_issues)} open issues).")
-            else:
-                print(f"\nAll {len(open_issues)} open issues already have the correct sub-system group value. No changes needed.")
-            target_issues = open_issues
-
-        else:
-            # Just the single issue
-            issue_data = finder.get_issue(args.issue_key)
-            if not issue_data:
-                print(f"Issue {args.issue_key} not found")
-                return
-
-            fields = issue_data.get("fields", {})
-            current_sub_system_group = fields.get("customfield_12320851")
-            issue_status = fields.get("status", {}).get("name", "")
-
-            # Check if single issue is closed
-            if finder.is_issue_closed(issue_status):
-                print(
-                    f"Issue {args.issue_key} is closed (Status: {issue_status}). Skipping sub-system group modification."
-                )
-                return
-
-            # Display current sub-system group
-            if current_sub_system_group:
-                if isinstance(current_sub_system_group, list) and current_sub_system_group:
-                    # Handle list of dictionaries (common for multi-select fields)
-                    if isinstance(current_sub_system_group[0], dict):
-                        current_value = current_sub_system_group[0].get("value", str(current_sub_system_group[0]))
-                    else:
-                        current_value = str(current_sub_system_group[0])
-                elif isinstance(current_sub_system_group, dict):
-                    current_value = current_sub_system_group.get("value", str(current_sub_system_group))
-                else:
-                    current_value = str(current_sub_system_group)
-                print(f"Current Sub-System Group: {current_value}")
-            else:
-                print("Current Sub-System Group: None")
-
-            # Create JiraIssue object for consistency with bulk operation pattern
-            target_issues = [
-                finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
-            ]
-            # Check if the single issue actually needs an update
-            issues_needing_update = finder.get_issues_needing_update(
-                target_issues, "sub_system_group", args.value, args.operation
-            )
-
-            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-            print(f"Status: {issue_status}")
-            print(f"\nThis will perform '{operation_name}' on this issue only.")
-
-            # Show affected tickets with color coding
-            print(f"\nAFFECTED TICKETS (1):")
-            print("=" * 50)
-            finder.print_hierarchy(
-                target_issues,
-                show_labels=True,
-                show_sub_system_group=True,
-                issues_needing_update=issues_needing_update
-            )
-
-            # Show explanation if needed
-            already_correct = len(target_issues) - len(issues_needing_update)
-            if already_correct > 0:
-                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct sub-system group value")
-
-            if len(issues_needing_update) > 0:
-                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issue(s).")
-            else:
-                print(f"\nAll issues already have the correct sub-system group value. No changes needed.")
-
-        # Use bulk operation
-        finder._perform_bulk_operation(
-            target_issues,
-            operation_name,
-            operation_func,
-            args.value,
-            show_sub_system_group=True,
-            issues_needing_update=issues_needing_update,
-        )
-
-    except (AuthenticationError, APIError, RateLimitError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
+    )
 
 
 def action_list_sub_system_groups(args):
@@ -2570,21 +2236,8 @@ def action_list_sub_system_groups(args):
 
 def action_set_assigned_team(args):
     """Set the Assigned Team field on an issue and optionally its descendants."""
-    try:
-        config = JiraConfig(args.config)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Use 'create-config' action to create a sample config file.")
-        sys.exit(1)
-
-    if not all([config.base_url, config.username, config.api_token]):
-        print(
-            "Error: Missing required configuration values (base_url, username, api_token)"
-        )
-        print("Please check your config file")
-        sys.exit(1)
-
-    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
 
     # Operation is always "set" for assigned team
     operation_func = finder.set_assigned_team_on_issue
@@ -2593,136 +2246,21 @@ def action_set_assigned_team(args):
     else:
         operation_name = "clearing assigned team"
 
-    try:
-        if args.include_children:
-            print(f"Finding all descendants of {args.issue_key}...")
-            all_issues = finder.find_descendants(args.issue_key)
-            if not all_issues:
-                print(f"No issues found for {args.issue_key}")
-                return
+    operation_config = OperationConfig(
+        operation_type="assigned_team",
+        operation_name=operation_name,
+        operation_func=operation_func,
+        operation_args=[args.value],
+        show_labels=True,
+        show_assigned_team=True
+    )
 
-            # Filter out closed issues
-            open_issues = [
-                issue
-                for issue in all_issues
-                if not finder.is_issue_closed(issue.status)
-            ]
-            closed_issues = [
-                issue for issue in all_issues if finder.is_issue_closed(issue.status)
-            ]
-
-            if not open_issues:
-                print(
-                    f"No open issues found for {args.issue_key} (all {len(closed_issues)} issues are closed)"
-                )
-                return
-
-            # Determine which issues actually need updates
-            issues_needing_update = finder.get_issues_needing_update(
-                open_issues, "assigned_team", args.value
-            )
-
-            print(
-                f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
-            )
-            print("Open issues that will be affected:")
-            print("=" * 50)
-            finder.print_hierarchy(
-                open_issues,
-                show_labels=True,
-                show_assigned_team=True,
-                issues_needing_update=issues_needing_update
-            )
-
-            if closed_issues:
-                print(f"\nSkipping {len(closed_issues)} closed issues:")
-                for issue in closed_issues:
-                    print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
-
-            already_correct = len(open_issues) - len(issues_needing_update)
-            if already_correct > 0:
-                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct assigned team value")
-
-            if len(issues_needing_update) > 0:
-                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issues (out of {len(open_issues)} open issues).")
-            else:
-                print(f"\nAll {len(open_issues)} open issues already have the correct assigned team value. No changes needed.")
-            target_issues = open_issues
-
-        else:
-            # Just the single issue
-            issue_data = finder.get_issue(args.issue_key)
-            if not issue_data:
-                print(f"Issue {args.issue_key} not found")
-                return
-
-            fields = issue_data.get("fields", {})
-            current_assigned_team = fields.get("customfield_12326540")
-            issue_status = fields.get("status", {}).get("name", "")
-
-            # Check if single issue is closed
-            if finder.is_issue_closed(issue_status):
-                print(
-                    f"Issue {args.issue_key} is closed (Status: {issue_status}). Skipping assigned team modification."
-                )
-                return
-
-            # Display current assigned team
-            if current_assigned_team:
-                if isinstance(current_assigned_team, dict):
-                    current_value = current_assigned_team.get("value", str(current_assigned_team))
-                else:
-                    current_value = str(current_assigned_team)
-                print(f"Current Assigned Team: {current_value}")
-            else:
-                print("Current Assigned Team: None")
-
-            # Create JiraIssue object for consistency with bulk operation pattern
-            target_issues = [
-                finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
-            ]
-            # Check if the single issue actually needs an update
-            issues_needing_update = finder.get_issues_needing_update(
-                target_issues, "assigned_team", args.value
-            )
-
-            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-            print(f"Status: {issue_status}")
-            print(f"\nThis will perform '{operation_name}' on this issue only.")
-
-            # Show affected tickets with color coding
-            print(f"\nAFFECTED TICKETS (1):")
-            print("=" * 50)
-            finder.print_hierarchy(
-                target_issues,
-                show_labels=True,
-                show_assigned_team=True,
-                issues_needing_update=issues_needing_update
-            )
-
-            # Show explanation if needed
-            already_correct = len(target_issues) - len(issues_needing_update)
-            if already_correct > 0:
-                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct assigned team value")
-
-            if len(issues_needing_update) > 0:
-                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issue(s).")
-            else:
-                print(f"\nAll issues already have the correct assigned team value. No changes needed.")
-
-        # Use bulk operation
-        finder._perform_bulk_operation(
-            target_issues,
-            operation_name,
-            operation_func,
-            args.value,
-            show_assigned_team=True,
-            issues_needing_update=issues_needing_update,
-        )
-
-    except (AuthenticationError, APIError, RateLimitError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
+    )
 
 
 def action_list_assigned_teams(args):
