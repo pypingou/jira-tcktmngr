@@ -923,20 +923,34 @@ class JiraDescendantFinder:
         confirm: bool = True,
         show_sub_system_group: bool = False,
         show_assigned_team: bool = False,
+        issues_needing_update: List[str] = None,
     ) -> int:
         """Perform a bulk operation on multiple issues with confirmation."""
         if not issues:
             self.logger.warning(f"No issues provided for {operation_name}")
             return 0
 
+        # If we have issues_needing_update list, check if any actually need updates
+        if issues_needing_update is not None and len(issues_needing_update) == 0:
+            print(f"\nAll issues already have the correct values. No changes needed.")
+            return 0
+
         # Show affected tickets
         print(f"\nAFFECTED TICKETS ({len(issues)}):")
         print("=" * 50)
-        self.print_hierarchy(issues, show_labels=True, show_sub_system_group=show_sub_system_group, show_assigned_team=show_assigned_team)
+        self.print_hierarchy(
+            issues,
+            show_labels=True,
+            show_sub_system_group=show_sub_system_group,
+            show_assigned_team=show_assigned_team,
+            issues_needing_update=issues_needing_update
+        )
 
         if confirm:
+            # Only prompt for issues that actually need updates
+            actual_count = len(issues_needing_update) if issues_needing_update is not None else len(issues)
             response = input(
-                f"\nProceed with {operation_name} on {len(issues)} issue(s) above? (y/N): "
+                f"\nProceed with {operation_name} on {actual_count} issue(s) above? (y/N): "
             )
             if response.lower() not in ["y", "yes"]:
                 print("Cancelled.")
@@ -1527,6 +1541,65 @@ class JiraDescendantFinder:
             print(f"  ✗ {issue_key}: Error reopening ticket - {e}")
             return False
 
+    def get_issues_needing_update(
+        self,
+        issues: List[JiraIssue],
+        operation_type: str,
+        target_value: str = None,
+        operation: str = None
+    ) -> List[str]:
+        """Determine which issues actually need updates based on their current values.
+
+        Args:
+            issues: List of issues to check
+            operation_type: Type of operation ('assigned_team', 'sub_system_group', 'label_add', 'label_remove', 'close', 'reopen')
+            target_value: The target value to set/add/remove
+            operation: For sub_system_group: 'add', 'remove', 'replace'
+
+        Returns:
+            List of issue keys that need updates
+        """
+        issues_needing_update = []
+
+        for issue in issues:
+            needs_update = False
+
+            if operation_type == "assigned_team":
+                # For assigned team, check if current value matches target
+                current_value = issue.assigned_team or ""
+                needs_update = current_value != (target_value or "")
+
+            elif operation_type == "sub_system_group":
+                current_values = issue.sub_system_group or []
+                if isinstance(current_values, str):
+                    current_values = [current_values] if current_values else []
+
+                if operation == "add":
+                    needs_update = target_value not in current_values
+                elif operation == "remove":
+                    needs_update = target_value in current_values
+                elif operation == "replace":
+                    needs_update = current_values != [target_value] if target_value else len(current_values) > 0
+
+            elif operation_type == "label_add":
+                current_labels = issue.labels or []
+                needs_update = target_value not in current_labels
+            elif operation_type == "label_remove":
+                current_labels = issue.labels or []
+                needs_update = target_value in current_labels
+
+            elif operation_type == "close":
+                # For closing, check if issue is currently open (needs closing)
+                needs_update = not self.is_issue_closed(issue.status)
+            elif operation_type == "reopen":
+                # For reopening, check if issue is currently closed (needs reopening)
+                needs_update = self.is_issue_closed(issue.status)
+
+            if needs_update:
+                issues_needing_update.append(issue.key)
+
+        return issues_needing_update
+
     def print_hierarchy(
         self,
         issues: List[JiraIssue],
@@ -1535,6 +1608,7 @@ class JiraDescendantFinder:
         show_labels: bool = False,
         show_sub_system_group: bool = False,
         show_assigned_team: bool = False,
+        issues_needing_update: List[str] = None,
     ) -> None:
         """Print the issue hierarchy in a tree format with color coding."""
         if not issues:
@@ -1554,12 +1628,17 @@ class JiraDescendantFinder:
             else:
                 prefix = f"{Colors.BLUE}└─ {Colors.RESET}"
 
-            # Add colored status symbol
+            # Add colored status symbol with update indicator
             is_closed = self.is_issue_closed(issue.status)
+            needs_update = issues_needing_update is None or issue.key in issues_needing_update
+
             if is_closed:
                 status_symbol = f"{Colors.RED}✗{Colors.RESET}"
-            else:
+            elif needs_update:
                 status_symbol = f"{Colors.GREEN}✓{Colors.RESET}"
+            else:
+                # Issue is open but doesn't need update (already has correct value)
+                status_symbol = f"{Colors.YELLOW}~{Colors.RESET}"
 
             # Color the issue key and summary
             colored_key = f"{Colors.BOLD}{issue.key}{Colors.RESET}"
@@ -1720,6 +1799,11 @@ def action_add_label(args) -> None:
                 )
                 return
 
+            # Determine which issues actually need updates
+            issues_needing_update = finder.get_issues_needing_update(
+                open_issues, "label_add", args.label
+            )
+
             logger.info(
                 f"Found {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed)"
             )
@@ -1728,16 +1812,25 @@ def action_add_label(args) -> None:
             )
             print("Open issues that will be affected:")
             print("=" * 50)
-            finder.print_hierarchy(open_issues, show_labels=True)
+            finder.print_hierarchy(
+                open_issues,
+                show_labels=True,
+                issues_needing_update=issues_needing_update
+            )
 
             if closed_issues:
                 print(f"\nSkipping {len(closed_issues)} closed issues:")
                 for issue in closed_issues:
                     print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
 
-            print(
-                f"\nThis will add label '{args.label}' to {len(open_issues)} open issues."
-            )
+            already_correct = len(open_issues) - len(issues_needing_update)
+            if already_correct > 0:
+                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has this label")
+
+            if len(issues_needing_update) > 0:
+                print(f"\nThis will add label '{args.label}' to {len(issues_needing_update)} issues (out of {len(open_issues)} open issues).")
+            else:
+                print(f"\nAll {len(open_issues)} open issues already have the label '{args.label}'. No changes needed.")
             target_issues = open_issues
 
         else:
@@ -1772,6 +1865,7 @@ def action_add_label(args) -> None:
             f"adding label '{args.label}'",
             finder.add_label_to_issue,
             args.label,
+            issues_needing_update=issues_needing_update,
         )
 
     except (AuthenticationError, APIError, RateLimitError) as e:
@@ -1830,12 +1924,21 @@ def action_remove_label(args):
             )
             return
 
+        # Determine which issues actually need updates
+        issues_needing_update = finder.get_issues_needing_update(
+            open_issues_with_label, "label_remove", args.label
+        )
+
         print(
             f"\nFound {len(issues_with_label)} total issues with label '{args.label}' ({len(open_issues_with_label)} open, {len(closed_issues_with_label)} closed):"
         )
         print("Open issues that will be affected:")
         print("=" * 50)
-        finder.print_hierarchy(open_issues_with_label, show_labels=True)
+        finder.print_hierarchy(
+            open_issues_with_label,
+            show_labels=True,
+            issues_needing_update=issues_needing_update
+        )
 
         if closed_issues_with_label:
             print(
@@ -1844,9 +1947,14 @@ def action_remove_label(args):
             for issue in closed_issues_with_label:
                 print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
 
-        print(
-            f"\nThis will remove label '{args.label}' from {len(open_issues_with_label)} open issues."
-        )
+        already_correct = len(open_issues_with_label) - len(issues_needing_update)
+        if already_correct > 0:
+            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct label value")
+
+        if len(issues_needing_update) > 0:
+            print(f"\nThis will remove label '{args.label}' from {len(issues_needing_update)} issues (out of {len(open_issues_with_label)} open issues).")
+        else:
+            print(f"\nAll {len(open_issues_with_label)} open issues already have the correct label value. No changes needed.")
         all_issues = open_issues_with_label
 
     else:
@@ -1872,10 +1980,7 @@ def action_remove_label(args):
             )
             return
 
-        print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-        print(f"Current labels: {current_labels}")
-        print(f"Status: {issue_status}")
-        print(f"\nThis will remove label '{args.label}' from this issue only.")
+        # Create JiraIssue object for consistency with bulk operation pattern
         all_issues = [
             JiraIssue(
                 key=args.issue_key,
@@ -1886,29 +1991,42 @@ def action_remove_label(args):
                 level=0,
             )
         ]
+        # Check if the single issue actually needs an update
+        issues_needing_update = finder.get_issues_needing_update(
+            all_issues, "label_remove", args.label
+        )
 
-    # Confirmation with affected tickets hierarchy
-    print(f"\nAFFECTED TICKETS ({len(all_issues)}):")
-    print("=" * 50)
-    finder.print_hierarchy(all_issues, show_labels=True)
+        print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
+        print(f"Current labels: {current_labels}")
+        print(f"Status: {issue_status}")
+        print(f"\nThis will remove label '{args.label}' from this issue only.")
 
-    response = input(
-        f"\nProceed with removing label '{args.label}' from {len(all_issues)} issue(s) above? (y/N): "
-    )
-    if response.lower() not in ["y", "yes"]:
-        print("Cancelled.")
-        return
+        # Show affected tickets with color coding
+        print(f"\nAFFECTED TICKETS (1):")
+        print("=" * 50)
+        finder.print_hierarchy(
+            all_issues,
+            show_labels=True,
+            issues_needing_update=issues_needing_update
+        )
 
-    # Remove the label
-    print(f"\nRemoving label '{args.label}'...")
-    success_count = 0
-    for issue in all_issues:
-        if finder.remove_label_from_issue(issue.key, args.label):
-            success_count += 1
-        time.sleep(0.1)  # Be nice to the API
+        # Show explanation if needed
+        already_correct = len(all_issues) - len(issues_needing_update)
+        if already_correct > 0:
+            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct label value")
 
-    print(
-        f"\nCompleted: {success_count}/{len(all_issues)} issues updated successfully."
+        if len(issues_needing_update) > 0:
+            print(f"\nThis will remove label '{args.label}' from {len(issues_needing_update)} issue(s).")
+        else:
+            print(f"\nAll issues already have the correct label value. No changes needed.")
+
+    # Use bulk operation
+    finder._perform_bulk_operation(
+        all_issues,
+        f"removing label '{args.label}'",
+        finder.remove_label_from_issue,
+        args.label,
+        issues_needing_update=issues_needing_update,
     )
 
 
@@ -1951,21 +2069,35 @@ def action_close_ticket(args):
             )
             return
 
+        # Determine which issues actually need updates
+        issues_needing_update = finder.get_issues_needing_update(
+            open_issues, "close"
+        )
+
         print(
             f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
         )
-        print("Open issues that will be closed:")
+        print("Open issues that will be affected:")
         print("=" * 50)
-        finder.print_hierarchy(open_issues, show_labels=True)
+        finder.print_hierarchy(
+            open_issues,
+            show_labels=True,
+            issues_needing_update=issues_needing_update
+        )
 
         if closed_issues:
             print(f"\nSkipping {len(closed_issues)} already closed issues:")
             for issue in closed_issues:
                 print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
 
-        print(
-            f"\nThis will close {len(open_issues)} open issues with resolution '{args.resolution}'."
-        )
+        already_correct = len(open_issues) - len(issues_needing_update)
+        if already_correct > 0:
+            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct status")
+
+        if len(issues_needing_update) > 0:
+            print(f"\nThis will close {len(issues_needing_update)} issues (out of {len(open_issues)} open issues) with resolution '{args.resolution}'.")
+        else:
+            print(f"\nAll {len(open_issues)} open issues already have the correct status. No changes needed.")
         all_issues = open_issues
 
     else:
@@ -1983,9 +2115,7 @@ def action_close_ticket(args):
             print(f"Issue {args.issue_key} is already closed (Status: {issue_status}).")
             return
 
-        print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-        print(f"Status: {issue_status}")
-        print(f"\nThis will close this issue with resolution '{args.resolution}'.")
+        # Create JiraIssue object for consistency with bulk operation pattern
         all_issues = [
             JiraIssue(
                 key=args.issue_key,
@@ -1996,28 +2126,42 @@ def action_close_ticket(args):
                 level=0,
             )
         ]
+        # Check if the single issue actually needs an update
+        issues_needing_update = finder.get_issues_needing_update(
+            all_issues, "close"
+        )
 
-    # Confirmation with affected tickets hierarchy
-    print(f"\nAFFECTED TICKETS ({len(all_issues)}):")
-    print("=" * 50)
-    finder.print_hierarchy(all_issues, show_labels=True)
+        print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
+        print(f"Status: {issue_status}")
+        print(f"\nThis will close this issue with resolution '{args.resolution}'.")
 
-    response = input(
-        f"\nProceed with closing {len(all_issues)} issue(s) above with resolution '{args.resolution}'? (y/N): "
+        # Show affected tickets with color coding
+        print(f"\nAFFECTED TICKETS (1):")
+        print("=" * 50)
+        finder.print_hierarchy(
+            all_issues,
+            show_labels=True,
+            issues_needing_update=issues_needing_update
+        )
+
+        # Show explanation if needed
+        already_correct = len(all_issues) - len(issues_needing_update)
+        if already_correct > 0:
+            print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct status")
+
+        if len(issues_needing_update) > 0:
+            print(f"\nThis will close {len(issues_needing_update)} issue(s) with resolution '{args.resolution}'.")
+        else:
+            print(f"\nAll issues already have the correct status. No changes needed.")
+
+    # Use bulk operation
+    finder._perform_bulk_operation(
+        all_issues,
+        f"closing tickets with resolution '{args.resolution}'",
+        finder.close_ticket,
+        args.resolution,
+        issues_needing_update=issues_needing_update,
     )
-    if response.lower() not in ["y", "yes"]:
-        print("Cancelled.")
-        return
-
-    # Close the tickets
-    print(f"\nClosing tickets with resolution '{args.resolution}'...")
-    success_count = 0
-    for issue in all_issues:
-        if finder.close_ticket(issue.key, args.resolution):
-            success_count += 1
-        time.sleep(0.1)  # Be nice to the API
-
-    print(f"\nCompleted: {success_count}/{len(all_issues)} issues closed successfully.")
 
 
 def action_reopen_ticket(args):
@@ -2052,22 +2196,53 @@ def action_reopen_ticket(args):
         print(f"Issue {args.issue_key} is already open (Status: {issue_status}).")
         return
 
+    # Create JiraIssue object for consistency with bulk operation pattern
+    target_issues = [
+        JiraIssue(
+            key=args.issue_key,
+            summary=fields.get("summary", ""),
+            issue_type=fields.get("issuetype", {}).get("name", ""),
+            status=issue_status,
+            labels=fields.get("labels", []),
+            level=0,
+        )
+    ]
+
+    # Check if the issue actually needs an update
+    issues_needing_update = finder.get_issues_needing_update(
+        target_issues, "reopen"
+    )
+
     print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
     print(f"Current Status: {issue_status}")
     print(f"\nThis will reopen this ticket.")
 
-    # Confirmation
-    response = input(f"\nProceed with reopening {args.issue_key}? (y/N): ")
-    if response.lower() not in ["y", "yes"]:
-        print("Cancelled.")
-        return
+    # Show affected tickets with color coding
+    print(f"\nAFFECTED TICKETS (1):")
+    print("=" * 50)
+    finder.print_hierarchy(
+        target_issues,
+        show_labels=True,
+        issues_needing_update=issues_needing_update
+    )
 
-    # Reopen the ticket
-    print(f"\nReopening ticket...")
-    if finder.reopen_ticket(args.issue_key):
-        print(f"\nCompleted: Issue {args.issue_key} reopened successfully.")
+    # Show explanation if needed
+    already_correct = len(target_issues) - len(issues_needing_update)
+    if already_correct > 0:
+        print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct status")
+
+    if len(issues_needing_update) > 0:
+        print(f"\nThis will reopen {len(issues_needing_update)} issue(s).")
     else:
-        print(f"\nFailed to reopen issue {args.issue_key}.")
+        print(f"\nAll issues already have the correct status. No changes needed.")
+
+    # Use bulk operation for consistency
+    finder._perform_bulk_operation(
+        target_issues,
+        "reopening tickets",
+        finder.reopen_ticket,
+        issues_needing_update=issues_needing_update,
+    )
 
 
 def action_summarize(args):
@@ -2230,19 +2405,36 @@ def action_edit_sub_system_group(args):
                 )
                 return
 
+            # Determine which issues actually need updates
+            issues_needing_update = finder.get_issues_needing_update(
+                open_issues, "sub_system_group", args.value, args.operation
+            )
+
             print(
                 f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
             )
             print("Open issues that will be affected:")
             print("=" * 50)
-            finder.print_hierarchy(open_issues, show_labels=True, show_sub_system_group=True)
+            finder.print_hierarchy(
+                open_issues,
+                show_labels=True,
+                show_sub_system_group=True,
+                issues_needing_update=issues_needing_update
+            )
 
             if closed_issues:
                 print(f"\nSkipping {len(closed_issues)} closed issues:")
                 for issue in closed_issues:
                     print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
 
-            print(f"\nThis will perform '{operation_name}' on {len(open_issues)} open issues.")
+            already_correct = len(open_issues) - len(issues_needing_update)
+            if already_correct > 0:
+                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct sub-system group value")
+
+            if len(issues_needing_update) > 0:
+                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issues (out of {len(open_issues)} open issues).")
+            else:
+                print(f"\nAll {len(open_issues)} open issues already have the correct sub-system group value. No changes needed.")
             target_issues = open_issues
 
         else:
@@ -2279,12 +2471,38 @@ def action_edit_sub_system_group(args):
             else:
                 print("Current Sub-System Group: None")
 
-            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-            print(f"Status: {issue_status}")
-            print(f"\nThis will perform '{operation_name}' on this issue only.")
+            # Create JiraIssue object for consistency with bulk operation pattern
             target_issues = [
                 finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
             ]
+            # Check if the single issue actually needs an update
+            issues_needing_update = finder.get_issues_needing_update(
+                target_issues, "sub_system_group", args.value, args.operation
+            )
+
+            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
+            print(f"Status: {issue_status}")
+            print(f"\nThis will perform '{operation_name}' on this issue only.")
+
+            # Show affected tickets with color coding
+            print(f"\nAFFECTED TICKETS (1):")
+            print("=" * 50)
+            finder.print_hierarchy(
+                target_issues,
+                show_labels=True,
+                show_sub_system_group=True,
+                issues_needing_update=issues_needing_update
+            )
+
+            # Show explanation if needed
+            already_correct = len(target_issues) - len(issues_needing_update)
+            if already_correct > 0:
+                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct sub-system group value")
+
+            if len(issues_needing_update) > 0:
+                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issue(s).")
+            else:
+                print(f"\nAll issues already have the correct sub-system group value. No changes needed.")
 
         # Use bulk operation
         finder._perform_bulk_operation(
@@ -2293,6 +2511,7 @@ def action_edit_sub_system_group(args):
             operation_func,
             args.value,
             show_sub_system_group=True,
+            issues_needing_update=issues_needing_update,
         )
 
     except (AuthenticationError, APIError, RateLimitError) as e:
@@ -2398,19 +2617,36 @@ def action_set_assigned_team(args):
                 )
                 return
 
+            # Determine which issues actually need updates
+            issues_needing_update = finder.get_issues_needing_update(
+                open_issues, "assigned_team", args.value
+            )
+
             print(
                 f"\nFound {len(all_issues)} total issues ({len(open_issues)} open, {len(closed_issues)} closed):"
             )
             print("Open issues that will be affected:")
             print("=" * 50)
-            finder.print_hierarchy(open_issues, show_labels=True, show_assigned_team=True)
+            finder.print_hierarchy(
+                open_issues,
+                show_labels=True,
+                show_assigned_team=True,
+                issues_needing_update=issues_needing_update
+            )
 
             if closed_issues:
                 print(f"\nSkipping {len(closed_issues)} closed issues:")
                 for issue in closed_issues:
                     print(f"  {issue.key}: {issue.summary} (Status: {issue.status})")
 
-            print(f"\nThis will perform '{operation_name}' on {len(open_issues)} open issues.")
+            already_correct = len(open_issues) - len(issues_needing_update)
+            if already_correct > 0:
+                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct assigned team value")
+
+            if len(issues_needing_update) > 0:
+                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issues (out of {len(open_issues)} open issues).")
+            else:
+                print(f"\nAll {len(open_issues)} open issues already have the correct assigned team value. No changes needed.")
             target_issues = open_issues
 
         else:
@@ -2441,12 +2677,38 @@ def action_set_assigned_team(args):
             else:
                 print("Current Assigned Team: None")
 
-            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
-            print(f"Status: {issue_status}")
-            print(f"\nThis will perform '{operation_name}' on this issue only.")
+            # Create JiraIssue object for consistency with bulk operation pattern
             target_issues = [
                 finder._create_jira_issue_from_data(args.issue_key, issue_data, 0)
             ]
+            # Check if the single issue actually needs an update
+            issues_needing_update = finder.get_issues_needing_update(
+                target_issues, "assigned_team", args.value
+            )
+
+            print(f"Issue: {args.issue_key}: {fields.get('summary', '')}")
+            print(f"Status: {issue_status}")
+            print(f"\nThis will perform '{operation_name}' on this issue only.")
+
+            # Show affected tickets with color coding
+            print(f"\nAFFECTED TICKETS (1):")
+            print("=" * 50)
+            finder.print_hierarchy(
+                target_issues,
+                show_labels=True,
+                show_assigned_team=True,
+                issues_needing_update=issues_needing_update
+            )
+
+            # Show explanation if needed
+            already_correct = len(target_issues) - len(issues_needing_update)
+            if already_correct > 0:
+                print(f"\n{Colors.YELLOW}~{Colors.RESET} = Issue already has correct assigned team value")
+
+            if len(issues_needing_update) > 0:
+                print(f"\nThis will perform '{operation_name}' on {len(issues_needing_update)} issue(s).")
+            else:
+                print(f"\nAll issues already have the correct assigned team value. No changes needed.")
 
         # Use bulk operation
         finder._perform_bulk_operation(
@@ -2455,6 +2717,7 @@ def action_set_assigned_team(args):
             operation_func,
             args.value,
             show_assigned_team=True,
+            issues_needing_update=issues_needing_update,
         )
 
     except (AuthenticationError, APIError, RateLimitError) as e:
