@@ -255,19 +255,22 @@ class JiraIssue:
     level: int = 0
     sub_system_group: Optional[str] = None
     assigned_team: Optional[str] = None
+    fix_versions: Optional[List[str]] = None
 
 
 @dataclass
 class OperationConfig:
     """Configuration for bulk operations."""
-    operation_type: str  # 'label_add', 'label_remove', 'close', 'reopen', 'sub_system_group', 'assigned_team'
+    operation_type: str  # 'label_add', 'label_remove', 'close', 'reopen', 'sub_system_group', 'assigned_team', 'fix_version'
     operation_name: str  # Human-readable operation description
     operation_func: callable  # Function to call for each issue
     operation_args: List  # Arguments to pass to operation_func
     show_labels: bool = False
     show_sub_system_group: bool = False
     show_assigned_team: bool = False
+    show_fix_versions: bool = False
     sub_system_operation: Optional[str] = None  # For sub_system_group: 'add', 'remove', 'replace'
+    fix_version_operation: Optional[str] = None  # For fix_version: 'add', 'remove', 'replace'
 
 
 class JiraConfig:
@@ -372,7 +375,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks,comments",
-            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940,comment",
+            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940,comment,fixVersions",
         }
 
         try:
@@ -492,7 +495,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks",
-            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940",
+            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940,fixVersions",
         }
 
         try:
@@ -822,6 +825,18 @@ class JiraDescendantFinder:
             else:
                 assigned_team = str(assigned_team_value)
 
+        # Extract fix versions field
+        fix_versions = []
+        fix_versions_value = fields.get("fixVersions", [])
+        if fix_versions_value:
+            for version in fix_versions_value:
+                if isinstance(version, dict):
+                    version_name = version.get("name", "")
+                    if version_name:
+                        fix_versions.append(version_name)
+                else:
+                    fix_versions.append(str(version))
+
         return JiraIssue(
             key=issue_key,
             summary=fields.get("summary", ""),
@@ -831,6 +846,7 @@ class JiraDescendantFinder:
             level=level,
             sub_system_group=sub_system_group,
             assigned_team=assigned_team,
+            fix_versions=fix_versions if fix_versions else None,
         )
 
     def _find_subtask_children(self, fields: Dict, level: int) -> List[JiraIssue]:
@@ -937,6 +953,7 @@ class JiraDescendantFinder:
         show_labels: bool = False,
         show_sub_system_group: bool = False,
         show_assigned_team: bool = False,
+        show_fix_versions: bool = False,
         issues_needing_update: List[str] = None,
     ) -> int:
         """Perform a bulk operation on multiple issues with confirmation."""
@@ -957,6 +974,7 @@ class JiraDescendantFinder:
             show_labels=show_labels,
             show_sub_system_group=show_sub_system_group,
             show_assigned_team=show_assigned_team,
+            show_fix_versions=show_fix_versions,
             issues_needing_update=issues_needing_update
         )
 
@@ -973,7 +991,14 @@ class JiraDescendantFinder:
         # Perform operation
         print(f"\n{operation_name.capitalize()}...")
         success_count = 0
-        for issue in issues:
+
+        # Only operate on issues that actually need updates
+        if issues_needing_update is not None:
+            target_issues = [issue for issue in issues if issue.key in issues_needing_update]
+        else:
+            target_issues = issues
+
+        for issue in target_issues:
             try:
                 if operation_func(issue.key, *args):
                     success_count += 1
@@ -983,7 +1008,7 @@ class JiraDescendantFinder:
                 print(f"  ✗ {issue.key}: Error - {e}")
 
         print(
-            f"\nCompleted: {success_count}/{len(issues)} issues updated successfully."
+            f"\nCompleted: {success_count}/{len(target_issues)} issues updated successfully."
         )
         return success_count
 
@@ -1420,6 +1445,169 @@ class JiraDescendantFinder:
             return False
 
     @retry_with_backoff()
+    def get_available_fix_versions(self) -> List[Dict]:
+        """Get available fix version options from Jira."""
+        url = f"{self.base_url}/rest/api/2/project"
+
+        try:
+            response = self.session.get(url)
+            if response.status_code == 429:
+                raise RateLimitError("Rate limited while fetching projects")
+            self._handle_response_errors(response)
+
+            projects = response.json()
+            all_versions = []
+
+            for project in projects:
+                if project.get("key") in ["AUTOBU", "VROOM"]:  # Focus on relevant projects
+                    project_key = project.get("key")
+                    versions_url = f"{self.base_url}/rest/api/2/project/{project_key}/versions"
+
+                    try:
+                        versions_response = self.session.get(versions_url)
+                        if versions_response.status_code == 200:
+                            versions = versions_response.json()
+                            for version in versions:
+                                version["project"] = project_key  # Add project info
+                                all_versions.append(version)
+                    except Exception as e:
+                        self.logger.debug(f"Error fetching versions for project {project_key}: {e}")
+
+            return all_versions
+
+        except (RateLimitError, AuthenticationError, APIError):
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error fetching fix version options: {e}")
+            return []
+
+    @retry_with_backoff()
+    def modify_fix_version_on_issue(
+        self, issue_key: str, version_name: str, operation: str = "add"
+    ) -> bool:
+        """Modify the fix version field on a single issue.
+
+        Args:
+            issue_key: The issue key to modify
+            version_name: The fix version name to add/remove/set
+            operation: 'add', 'remove', or 'replace'
+        """
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+
+        # First get current fix version values
+        issue_data = self.get_issue(issue_key)
+        if not issue_data:
+            return False
+
+        fields = issue_data.get("fields", {})
+        current_fix_versions = fields.get("fixVersions", [])
+
+        # Extract project key from issue key (e.g., "VROOM-123" -> "VROOM")
+        project_key = issue_key.split("-")[0]
+
+        # Parse current version names
+        current_version_names = []
+        current_version_objects = []
+        for version in current_fix_versions:
+            if isinstance(version, dict):
+                name = version.get("name", "")
+                if name:
+                    current_version_names.append(name)
+                    current_version_objects.append(version)
+
+        # Determine new values based on operation
+        if operation == "replace":
+            # Replace entire list with single new version
+            if version_name in current_version_names:
+                # Find the existing version object
+                new_versions = [v for v in current_version_objects if v.get("name") == version_name]
+            else:
+                # Need to look up the version object for this name in the correct project
+                available_versions = self.get_available_fix_versions()
+                matching_version = None
+                for v in available_versions:
+                    if v.get("name") == version_name and v.get("project") == project_key:
+                        matching_version = {"name": v["name"], "id": v["id"]}
+                        break
+                if matching_version:
+                    new_versions = [matching_version]
+                else:
+                    print(f"  ✗ {issue_key}: Fix version '{version_name}' not found for project {project_key}")
+                    return False
+            action_verb = "Set"
+        elif operation == "add":
+            # Add new version if not already present
+            if version_name in current_version_names:
+                print(f"  {issue_key}: Fix version '{version_name}' already exists")
+                return True
+
+            # Look up the version object for this name in the correct project
+            available_versions = self.get_available_fix_versions()
+            matching_version = None
+            for v in available_versions:
+                if v.get("name") == version_name and v.get("project") == project_key:
+                    matching_version = {"name": v["name"], "id": v["id"]}
+                    break
+            if matching_version:
+                new_versions = current_version_objects + [matching_version]
+            else:
+                print(f"  ✗ {issue_key}: Fix version '{version_name}' not found for project {project_key}")
+                return False
+            action_verb = "Added"
+        elif operation == "remove":
+            # Remove version if present
+            if version_name not in current_version_names:
+                print(f"  {issue_key}: Fix version '{version_name}' does not exist")
+                return True
+            new_versions = [v for v in current_version_objects if v.get("name") != version_name]
+            action_verb = "Removed"
+        else:
+            raise ValueError(f"Invalid operation: {operation}")
+
+        # The fixVersions field expects an array of version objects
+        payload = {"fields": {"fixVersions": new_versions}}
+
+        try:
+            response = self.session.put(url, json=payload)
+            if response.status_code == 429:
+                raise RateLimitError(
+                    f"Rate limited while modifying fix version on {issue_key}"
+                )
+
+            if response.status_code == 204:  # Success
+                print(f"  ✓ {issue_key}: {action_verb} fix version '{version_name}'")
+                return True
+            else:
+                self.logger.error(
+                    f"Failed to modify fix version on {issue_key}: HTTP {response.status_code}"
+                )
+                print(
+                    f"  ✗ {issue_key}: Failed to modify fix version (HTTP {response.status_code})"
+                )
+                if response.text:
+                    print(f"      Error details: {response.text}")
+                return False
+
+        except (RateLimitError, AuthenticationError, APIError):
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error modifying fix version on {issue_key}: {e}")
+            print(f"  ✗ {issue_key}: Error modifying fix version - {e}")
+            return False
+
+    def add_fix_version_to_issue(self, issue_key: str, version_name: str) -> bool:
+        """Add a fix version to a single issue."""
+        return self.modify_fix_version_on_issue(issue_key, version_name, "add")
+
+    def remove_fix_version_from_issue(self, issue_key: str, version_name: str) -> bool:
+        """Remove a fix version from a single issue."""
+        return self.modify_fix_version_on_issue(issue_key, version_name, "remove")
+
+    def set_fix_version_on_issue(self, issue_key: str, version_name: str) -> bool:
+        """Set the fix version on a single issue (replaces all existing)."""
+        return self.modify_fix_version_on_issue(issue_key, version_name, "replace")
+
+    @retry_with_backoff()
     def get_available_transitions(self, issue_key: str) -> List[Dict]:
         """Get available transitions for an issue."""
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}/transitions"
@@ -1560,15 +1748,17 @@ class JiraDescendantFinder:
         issues: List[JiraIssue],
         operation_type: str,
         target_value: str = None,
-        operation: str = None
+        operation: str = None,
+        sub_system_operation: str = None,
+        fix_version_operation: str = None
     ) -> List[str]:
         """Determine which issues actually need updates based on their current values.
 
         Args:
             issues: List of issues to check
-            operation_type: Type of operation ('assigned_team', 'sub_system_group', 'label_add', 'label_remove', 'close', 'reopen')
+            operation_type: Type of operation ('assigned_team', 'sub_system_group', 'fix_version', 'label_add', 'label_remove', 'close', 'reopen')
             target_value: The target value to set/add/remove
-            operation: For sub_system_group: 'add', 'remove', 'replace'
+            operation: For sub_system_group/fix_version: 'add', 'remove', 'replace'
 
         Returns:
             List of issue keys that need updates
@@ -1588,12 +1778,24 @@ class JiraDescendantFinder:
                 if isinstance(current_values, str):
                     current_values = [current_values] if current_values else []
 
-                if operation == "add":
+                op = sub_system_operation or operation
+                if op == "add":
                     needs_update = target_value not in current_values
-                elif operation == "remove":
+                elif op == "remove":
                     needs_update = target_value in current_values
-                elif operation == "replace":
+                elif op == "replace":
                     needs_update = current_values != [target_value] if target_value else len(current_values) > 0
+
+            elif operation_type == "fix_version":
+                current_versions = issue.fix_versions or []
+
+                op = fix_version_operation or operation
+                if op == "add":
+                    needs_update = target_value not in current_versions
+                elif op == "remove":
+                    needs_update = target_value in current_versions
+                elif op == "replace":
+                    needs_update = current_versions != [target_value] if target_value else len(current_versions) > 0
 
             elif operation_type == "label_add":
                 current_labels = issue.labels or []
@@ -1622,6 +1824,7 @@ class JiraDescendantFinder:
         show_labels: bool = False,
         show_sub_system_group: bool = False,
         show_assigned_team: bool = False,
+        show_fix_versions: bool = False,
         issues_needing_update: List[str] = None,
     ) -> None:
         """Print the issue hierarchy in a tree format with color coding."""
@@ -1674,6 +1877,11 @@ class JiraDescendantFinder:
                 details.append(f"Sub-System Group: {Colors.CYAN}{issue.sub_system_group}{Colors.RESET}")
             if show_assigned_team and issue.assigned_team:
                 details.append(f"Assigned Team: {Colors.CYAN}{issue.assigned_team}{Colors.RESET}")
+            if show_fix_versions and issue.fix_versions:
+                colored_versions = (
+                    f"{Colors.GREEN}{', '.join(issue.fix_versions)}{Colors.RESET}"
+                )
+                details.append(f"Fix Versions: {colored_versions}")
 
             details_str = (
                 f"    {Colors.DIM}[{', '.join(details)}]{Colors.RESET}"
@@ -1697,6 +1905,7 @@ class JiraDescendantFinder:
                 "level": issue.level,
                 "sub_system_group": issue.sub_system_group,
                 "assigned_team": issue.assigned_team,
+                "fix_versions": issue.fix_versions,
             }
             for issue in issues
         ]
@@ -1761,7 +1970,8 @@ def filter_and_analyze_issues(
             open_issues,
             operation_config.operation_type,
             operation_config.operation_args[0] if operation_config.operation_args else None,
-            operation_config.sub_system_operation
+            sub_system_operation=operation_config.sub_system_operation,
+            fix_version_operation=operation_config.fix_version_operation
         )
 
         # Display status
@@ -1777,6 +1987,7 @@ def filter_and_analyze_issues(
             show_labels=operation_config.show_labels,
             show_sub_system_group=operation_config.show_sub_system_group,
             show_assigned_team=operation_config.show_assigned_team,
+            show_fix_versions=operation_config.show_fix_versions,
             issues_needing_update=issues_needing_update
         )
 
@@ -1810,7 +2021,8 @@ def filter_and_analyze_issues(
             target_issues,
             operation_config.operation_type,
             operation_config.operation_args[0] if operation_config.operation_args else None,
-            operation_config.sub_system_operation
+            sub_system_operation=operation_config.sub_system_operation,
+            fix_version_operation=operation_config.fix_version_operation
         )
 
         print(f"Issue: {issue_key}: {fields.get('summary', '')}")
@@ -1836,6 +2048,7 @@ def display_bulk_operation_status(
             show_labels=operation_config.show_labels,
             show_sub_system_group=operation_config.show_sub_system_group,
             show_assigned_team=operation_config.show_assigned_team,
+            show_fix_versions=operation_config.show_fix_versions,
             issues_needing_update=issues_needing_update
         )
 
@@ -1891,6 +2104,7 @@ def handle_bulk_issue_operation(
             show_labels=operation_config.show_labels,
             show_sub_system_group=operation_config.show_sub_system_group,
             show_assigned_team=operation_config.show_assigned_team,
+            show_fix_versions=operation_config.show_fix_versions,
             issues_needing_update=issues_needing_update,
         )
 
@@ -2128,6 +2342,7 @@ def action_find_descendants(args):
         show_labels=args.labels,
         show_sub_system_group=args.sub_system_group,
         show_assigned_team=args.assigned_team,
+        show_fix_versions=args.fix_versions,
     )
 
     if args.export:
@@ -2312,6 +2527,142 @@ def action_list_assigned_teams(args):
         sys.exit(1)
 
 
+def action_set_fix_version(args):
+    """Set the fix version field on an issue and optionally its descendants."""
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
+
+    # Operation is always "set" for fix version (replace)
+    operation_func = finder.set_fix_version_on_issue
+    operation_name = f"setting fix version to '{args.version}'"
+
+    operation_config = OperationConfig(
+        operation_type="fix_version",
+        operation_name=operation_name,
+        operation_func=operation_func,
+        operation_args=[args.version],
+        show_labels=True,
+        show_fix_versions=True,
+        fix_version_operation="replace"
+    )
+
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
+    )
+
+
+def action_add_fix_version(args):
+    """Add a fix version to an issue and optionally its descendants."""
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
+
+    operation_func = finder.add_fix_version_to_issue
+    operation_name = f"adding fix version '{args.version}'"
+
+    operation_config = OperationConfig(
+        operation_type="fix_version",
+        operation_name=operation_name,
+        operation_func=operation_func,
+        operation_args=[args.version],
+        show_labels=True,
+        show_fix_versions=True,
+        fix_version_operation="add"
+    )
+
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
+    )
+
+
+def action_remove_fix_version(args):
+    """Remove a fix version from an issue and optionally its descendants."""
+    # Get finder instance for operation function
+    finder = setup_jira_finder(args.config)
+
+    operation_func = finder.remove_fix_version_from_issue
+    operation_name = f"removing fix version '{args.version}'"
+
+    operation_config = OperationConfig(
+        operation_type="fix_version",
+        operation_name=operation_name,
+        operation_func=operation_func,
+        operation_args=[args.version],
+        show_labels=True,
+        show_fix_versions=True,
+        fix_version_operation="remove"
+    )
+
+    handle_bulk_issue_operation(
+        args.issue_key,
+        args.include_children,
+        operation_config,
+        args.config
+    )
+
+
+def action_list_fix_versions(args):
+    """List available fix version options."""
+    try:
+        config = JiraConfig(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Use 'create-config' action to create a sample config file.")
+        sys.exit(1)
+
+    if not all([config.base_url, config.username, config.api_token]):
+        print(
+            "Error: Missing required configuration values (base_url, username, api_token)"
+        )
+        print("Please check your config file")
+        sys.exit(1)
+
+    finder = JiraDescendantFinder(config.base_url, config.username, config.api_token)
+
+    try:
+        print("Fetching available fix version options...")
+        options = finder.get_available_fix_versions()
+
+        if not options:
+            print("No fix version options found or unable to fetch options.")
+            print("This might be due to permissions or field configuration.")
+            return
+
+        print(f"\nAvailable fix version options ({len(options)}):")
+        print("=" * 50)
+        for option in options:
+            if isinstance(option, dict):
+                name = option.get("name", "")
+                project = option.get("project", "")
+                released = option.get("released", False)
+                archived = option.get("archived", False)
+                release_date = option.get("releaseDate", "")
+
+                status_info = []
+                if released:
+                    status_info.append("released")
+                if archived:
+                    status_info.append("archived")
+
+                status = f" ({', '.join(status_info)})" if status_info else ""
+
+                if release_date:
+                    print(f"  {name} [{project}] - Release: {release_date}{status}")
+                else:
+                    print(f"  {name} [{project}]{status}")
+            else:
+                print(f"  {option}")
+
+    except (AuthenticationError, APIError, RateLimitError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Jira descendants finder")
     parser.add_argument(
@@ -2423,6 +2774,9 @@ def main() -> None:
         "--assigned-team", action="store_true", help="Show assigned team in output"
     )
     find_parser.add_argument(
+        "--fix-versions", action="store_true", help="Show fix versions in output"
+    )
+    find_parser.add_argument(
         "--open-only", action="store_true", help="Show only open tickets (exclude closed/done tickets)"
     )
     find_parser.set_defaults(func=action_find_descendants)
@@ -2490,6 +2844,67 @@ def main() -> None:
         help="List available Assigned Team options"
     )
     list_assigned_teams_parser.set_defaults(func=action_list_assigned_teams)
+
+    # set-fix-version action
+    set_fix_version_parser = subparsers.add_parser(
+        "set-fix-version",
+        help="Set (replace all) fix versions on an issue and optionally its descendants"
+    )
+    set_fix_version_parser.add_argument(
+        "issue_key", help="The issue key to modify (e.g., PROJ-123)"
+    )
+    set_fix_version_parser.add_argument(
+        "version", help="The fix version to set (replaces all existing fix versions)"
+    )
+    set_fix_version_parser.add_argument(
+        "--include-children",
+        action="store_true",
+        help="Also set fix version on all descendant issues",
+    )
+    set_fix_version_parser.set_defaults(func=action_set_fix_version)
+
+    # add-fix-version action
+    add_fix_version_parser = subparsers.add_parser(
+        "add-fix-version",
+        help="Add a fix version to an issue and optionally its descendants (keeps existing versions)"
+    )
+    add_fix_version_parser.add_argument(
+        "issue_key", help="The issue key to modify (e.g., PROJ-123)"
+    )
+    add_fix_version_parser.add_argument(
+        "version", help="The fix version to add (appends to existing fix versions)"
+    )
+    add_fix_version_parser.add_argument(
+        "--include-children",
+        action="store_true",
+        help="Also add fix version to all descendant issues",
+    )
+    add_fix_version_parser.set_defaults(func=action_add_fix_version)
+
+    # remove-fix-version action
+    remove_fix_version_parser = subparsers.add_parser(
+        "remove-fix-version",
+        help="Remove a fix version from an issue and optionally its descendants"
+    )
+    remove_fix_version_parser.add_argument(
+        "issue_key", help="The issue key to modify (e.g., PROJ-123)"
+    )
+    remove_fix_version_parser.add_argument(
+        "version", help="The fix version to remove (leaves other fix versions intact)"
+    )
+    remove_fix_version_parser.add_argument(
+        "--include-children",
+        action="store_true",
+        help="Also remove fix version from all descendant issues",
+    )
+    remove_fix_version_parser.set_defaults(func=action_remove_fix_version)
+
+    # list-fix-versions action
+    list_fix_versions_parser = subparsers.add_parser(
+        "list-fix-versions",
+        help="List available fix version options"
+    )
+    list_fix_versions_parser.set_defaults(func=action_list_fix_versions)
 
     args = parser.parse_args()
 
