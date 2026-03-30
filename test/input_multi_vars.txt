@@ -1,0 +1,66 @@
+# AUTOBU Initiative
+Parent: AUTOBU-999
+
+Title: Enable {PRODUCT} on {PLATFORM} for {AREA}
+
+Description:
+This template uses multiple variables:
+- Product: {PRODUCT}
+- Platform: {PLATFORM}
+- Area: {AREA}
+- Version: {VERSION}
+
+# VROOM Epic 1
+
+Title: Onboarding {AREA} on {PLATFORM}
+
+Description:
+h2. Goal
+Onboard {AREA} components for {PRODUCT} {VERSION}
+
+h2. Acceptance criteria
+* Component runs on {PLATFORM}
+
+# VROOM Epic 2
+
+Title: Testing {AREA}
+
+Description:
+h2. Goal
+Test {AREA} on {PLATFORM}
+
+h2. Acceptance criteria
+* Tests pass
+
+# VROOM Epic 3
+
+Title: Documentation
+
+Description:
+h2. Goal
+Document {AREA}
+
+h2. Acceptance criteria
+* Docs complete
+
+# VROOM Epic 4
+
+Title: Integration
+
+Description:
+h2. Goal
+Integrate {AREA}
+
+h2. Acceptance criteria
+* Integration complete
+
+# VROOM Epic 5
+
+Title: Deployment
+
+Description:
+h2. Goal
+Deploy {AREA}
+
+h2. Acceptance criteria
+* Deployed

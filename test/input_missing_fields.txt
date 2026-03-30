@@ -1,0 +1,29 @@
+# AUTOBU Initiative
+Parent: BAD-FORMAT
+
+Description:
+# Goal
+Test goal
+
+# Acceptance criteria
+Test criteria
+
+# VROOM Epic 1
+
+Description:
+# Goal
+Missing title field
+
+# Acceptance criteria
+Test
+
+# VROOM Epic 2
+
+Title: Valid Epic
+
+Description:
+# Goal
+Test
+
+# Acceptance criteria
+Test

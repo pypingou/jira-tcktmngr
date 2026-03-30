@@ -1,0 +1,22 @@
+# AUTOBU Initiative
+
+Title: Test {AREA} Initiative
+
+Description:
+h2. Goal
+Enable {AREA} support
+
+h2. Acceptance criteria
+* {AREA} is functional
+
+# VROOM Epic 1
+
+Title: Single Epic for {AREA}
+
+Description:
+h2. Goal
+Implement {AREA} support
+
+h2. Acceptance criteria
+* Implementation complete
+* Tests pass

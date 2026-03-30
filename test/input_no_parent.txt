@@ -1,0 +1,61 @@
+# AUTOBU Initiative
+
+Title: Test {AREA} Initiative
+
+Description:
+This is a test initiative without a parent
+
+# VROOM Epic 1
+
+Title: Epic 1
+
+Description:
+h2. Goal
+Test goal
+
+h2. Acceptance criteria
+Test criteria
+
+# VROOM Epic 2
+
+Title: Epic 2
+
+Description:
+h2. Goal
+Test goal
+
+h2. Acceptance criteria
+Test criteria
+
+# VROOM Epic 3
+
+Title: Epic 3
+
+Description:
+h2. Goal
+Test goal
+
+h2. Acceptance criteria
+Test criteria
+
+# VROOM Epic 4
+
+Title: Epic 4
+
+Description:
+h2. Goal
+Test goal
+
+h2. Acceptance criteria
+Test criteria
+
+# VROOM Epic 5
+
+Title: Epic 5
+
+Description:
+h2. Goal
+Test goal
+
+h2. Acceptance criteria
+Test criteria

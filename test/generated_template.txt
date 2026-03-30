@@ -1,0 +1,89 @@
+# AUTOBU Initiative
+
+Title: {FEATURE_NAME} for {AREA}
+
+Description:
+h2. Feature Overview
+
+Describe the high-level feature here. You can use variables like {AREA}, {VERSION}, etc.
+that can be replaced using --vars when creating tickets.
+
+h2. Goals
+
+The goal of this feature is to...
+
+At minimum we must:
+* First requirement
+* Second requirement
+* Third requirement
+
+As stretch goals we should:
+* Optional enhancement 1
+* Optional enhancement 2
+
+
+# VROOM Epic 1
+
+Title: First Epic for {AREA}
+
+Description:
+h2. Goal
+* The goal of this epic is to...
+
+h2. Acceptance criteria
+* We have completed...
+* We can demonstrate...
+* All tests pass
+
+
+# VROOM Epic 2
+
+Title: Second Epic for {AREA}
+
+Description:
+h2. Goal
+* The goal of this epic is to...
+
+h2. Acceptance criteria
+* Acceptance criterion 1
+* Acceptance criterion 2
+* Acceptance criterion 3
+
+
+# VROOM Epic 3
+
+Title: Third Epic for {AREA}
+
+Description:
+h2. Goal
+* The goal of this epic is to...
+
+h2. Acceptance criteria
+* Acceptance criterion 1
+* Acceptance criterion 2
+
+
+# VROOM Epic 4
+
+Title: Fourth Epic for {AREA}
+
+Description:
+h2. Goal
+* The goal of this epic is to...
+
+h2. Acceptance criteria
+* Acceptance criterion 1
+* Acceptance criterion 2
+
+
+# VROOM Epic 5
+
+Title: Fifth Epic for {AREA}
+
+Description:
+h2. Goal
+* The goal of this epic is to...
+
+h2. Acceptance criteria
+* Acceptance criterion 1
+* Acceptance criterion 2

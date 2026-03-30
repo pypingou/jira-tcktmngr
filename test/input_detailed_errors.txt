@@ -1,0 +1,45 @@
+# AUTOBU Initiative
+Parent: not-valid-format
+
+Description:
+# Goal
+Test goal
+
+# Acceptance criteria
+Test criteria
+
+# VROOM Epic 1
+
+Description:
+# Goal
+Missing title field
+
+# Acceptance criteria
+Test
+
+# VROOM Epic 2
+Parent: AUTOBU-123
+
+Title: Epic with parent field (invalid for epics)
+
+Description:
+# Goal
+Test
+
+# Acceptance criteria
+Test
+
+# VROOM Epic 3
+
+Title: Epic without description
+
+# VROOM Epic 99
+
+Title: High numbered epic (should still work)
+
+Description:
+# Goal
+Test
+
+# Acceptance criteria
+Test
