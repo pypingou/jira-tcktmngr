@@ -86,8 +86,8 @@ class Constants:
     CHILD_LINK_KEYWORDS = {"child", "subtask", "contains"}
     PARENT_LINK_KEYWORDS = {"parent", "epic"}
 
-    # Issue types that can have Epic Link children
-    EPIC_TYPES = {"Epic", "Initiative", "Feature"}
+    # Issue types that can have children via parent field (replaces Epic Link in Cloud)
+    EPIC_TYPES = {"Epic", "Initiative", "Feature", "Outcome"}
 
 
 class LogLevel(Enum):
@@ -306,7 +306,8 @@ class JiraDescendantFinder:
     def __init__(self, base_url: str, username: str, api_token: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Bearer {api_token}"})
+        # Use Basic Auth (works for both Jira Cloud and Server)
+        self.session.auth = (username, api_token)
         self.session.timeout = Constants.API_TIMEOUT
         self.visited: Set[str] = set()
         self.logger = logging.getLogger("jira-tcktmngr")
@@ -375,7 +376,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks,comments",
-            "fields": "summary,description,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940,comment,fixVersions",
+            "fields": "summary,description,issuetype,status,subtasks,issuelinks,parent,labels,customfield_10620,customfield_10606,comment,fixVersions",
         }
 
         try:
@@ -495,7 +496,7 @@ class JiraDescendantFinder:
         url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
         params = {
             "expand": "subtask,issuelinks",
-            "fields": "summary,issuetype,status,subtasks,issuelinks,epic,parent,labels,customfield_12313140,customfield_12315542,customfield_12316342,customfield_12321140,customfield_12326540,customfield_12320851,customfield_12312940,customfield_12313940,fixVersions",
+            "fields": "summary,issuetype,status,subtasks,issuelinks,parent,labels,customfield_10620,customfield_10606,fixVersions",
         }
 
         try:
@@ -589,8 +590,8 @@ class JiraDescendantFinder:
                 if any(keyword in field_str for keyword in ["rhivos", "sub", "group", "system"]) or any(keyword in field_name.lower() for keyword in ["sub", "group", "system"]):
                     print(f"    {field_name}: {field_value}")
 
-        # Check for sub-system group field specifically (customfield_12320851 is the actual Sub-System Group field)
-        sub_system_group_candidates = ["customfield_12320851", "customfield_12312940", "customfield_12313940", "Sub-System Group"]
+        # Check for sub-system group field specifically (customfield_10620 is the Sub-System Group field in Cloud)
+        sub_system_group_candidates = ["customfield_10620", "Sub-System Group"]
         print(f"\n  Sub-System Group field candidates:")
         for field_candidate in sub_system_group_candidates:
             value = fields.get(field_candidate)
@@ -607,11 +608,11 @@ class JiraDescendantFinder:
         self.search_referencing_issues(issue_key)
 
     def search_epic_children(self, epic_key: str) -> None:
-        """Search for issues that belong to this epic."""
-        print(f"\n  Searching for Epic children...")
-        url = f"{self.base_url}/rest/api/2/search"
+        """Search for issues that have this issue as their parent (replaces Epic Link in Cloud)."""
+        print(f"\n  Searching for child issues (via parent field)...")
+        url = f"{self.base_url}/rest/api/3/search/jql"
         params = {
-            "jql": f'"Epic Link" = {epic_key}',
+            "jql": f'parent = {epic_key}',
             "fields": "key,summary,issuetype,status,labels",
             "maxResults": 100,
         }
@@ -632,7 +633,7 @@ class JiraDescendantFinder:
         """Search for issues that reference this issue."""
         print(f"\n  Searching for issues that reference {issue_key}...")
 
-        # Try various JQL patterns
+        # Try various JQL patterns (Epic Link replaced with parent in Cloud)
         queries = [
             f'text ~ "{issue_key}"',
             f'summary ~ "{issue_key}"',
@@ -640,7 +641,6 @@ class JiraDescendantFinder:
             f'parent = "{issue_key}"',
             f'project in (AUTOBU, VROOM) AND text ~ "{issue_key}"',
             f'project in (AUTOBU, VROOM) AND summary ~ "{issue_key}"',
-            f'"Epic Link" = "{issue_key}"',
             f'"Feature Link" = "{issue_key}"',
             f'"Outcome Link" = "{issue_key}"',
             f'"Parent Feature" = "{issue_key}"',
@@ -649,7 +649,7 @@ class JiraDescendantFinder:
         ]
 
         for query in queries:
-            url = f"{self.base_url}/rest/api/2/search"
+            url = f"{self.base_url}/rest/api/3/search/jql"
             params = {
                 "jql": query,
                 "fields": "key,summary,issuetype,status,labels",
@@ -675,19 +675,19 @@ class JiraDescendantFinder:
             print("    No referencing issues found")
 
     def find_custom_field_children(self, issue_key: str) -> List[JiraIssue]:
-        """Find children via custom fields like Feature Link and Initiative Link."""
+        """Find children via custom fields. In Jira Cloud, most hierarchies use parent field now."""
         children = []
 
-        # Try multiple custom field searches
+        # Custom field queries - most hierarchies now use parent field, but keeping legacy field names for compatibility
         custom_field_queries = [
             f'"Feature Link" = "{issue_key}"',
-            f'cf[12313140] = "{issue_key}"',  # Initiative/Parent link field
             f'"Initiative Link" = "{issue_key}"',
             f'"Parent Initiative" = "{issue_key}"',
+            f'"Outcome Link" = "{issue_key}"',
         ]
 
         for jql_query in custom_field_queries:
-            url = f"{self.base_url}/rest/api/2/search"
+            url = f"{self.base_url}/rest/api/3/search/jql"
             params = {
                 "jql": jql_query,
                 "fields": "key,summary,issuetype,status,labels",
@@ -721,12 +721,12 @@ class JiraDescendantFinder:
         return children
 
     def search_epic_link_children(self, epic_key: str, level: int) -> List[JiraIssue]:
-        """Search for issues that have this epic as their Epic Link and recursively find their children."""
+        """Search for issues that have this epic as their parent and recursively find their children."""
         descendants = []
 
-        url = f"{self.base_url}/rest/api/2/search"
+        url = f"{self.base_url}/rest/api/3/search/jql"
         params = {
-            "jql": f'"Epic Link" = {epic_key}',
+            "jql": f'parent = {epic_key}',
             "fields": "key,summary,issuetype,status,labels",
             "maxResults": 100,
         }
@@ -752,12 +752,12 @@ class JiraDescendantFinder:
         return descendants
 
     def find_epic_children(self, epic_key: str) -> List[JiraIssue]:
-        """Find issues that belong to this epic via Epic Link."""
+        """Find issues that belong to this epic via parent field (replaces Epic Link in Cloud)."""
         children = []
 
-        url = f"{self.base_url}/rest/api/2/search"
+        url = f"{self.base_url}/rest/api/3/search/jql"
         params = {
-            "jql": f'"Epic Link" = {epic_key}',
+            "jql": f'parent = {epic_key}',
             "fields": "key,summary,issuetype,status,labels",
             "maxResults": 100,
         }
@@ -791,9 +791,9 @@ class JiraDescendantFinder:
         """Create a JiraIssue object from API response data."""
         fields = issue_data.get("fields", {})
 
-        # Extract sub-system group field - customfield_12320851 is the actual Sub-System Group field
+        # Extract sub-system group field - customfield_10620 is the Sub-System Group field in Cloud
         sub_system_group = None
-        for field_candidate in ["customfield_12320851", "customfield_12312940", "customfield_12313940", "Sub-System Group"]:
+        for field_candidate in ["customfield_10620", "Sub-System Group"]:
             value = fields.get(field_candidate)
             if value:
                 # Handle different possible formats (string, dict with value/name, list of dicts, etc.)
@@ -809,9 +809,9 @@ class JiraDescendantFinder:
                     sub_system_group = str(value)
                 break
 
-        # Extract assigned team field - customfield_12326540 is the Assigned-team field
+        # Extract assigned team field - customfield_10606 is the Assigned-team field
         assigned_team = None
-        assigned_team_value = fields.get("customfield_12326540")
+        assigned_team_value = fields.get("customfield_10606")
         if assigned_team_value:
             # Handle different possible formats (string, dict with value/name, list of dicts, etc.)
             if isinstance(assigned_team_value, list) and assigned_team_value:
@@ -1093,7 +1093,7 @@ class JiraDescendantFinder:
             sub_system_field = None
 
             for field in fields:
-                if field.get("id") == "customfield_12320851":
+                if field.get("id") == "customfield_10620":
                     sub_system_field = field
                     self.logger.debug(f"Found Sub-System group field: {field}")
                     # Found the Sub-System group field, get its options
@@ -1103,7 +1103,7 @@ class JiraDescendantFinder:
                     break
 
             if not sub_system_field:
-                self.logger.debug("Sub-System group field customfield_12320851 not found in field list")
+                self.logger.debug("Sub-System group field customfield_10620 not found in field list")
                 # Log all custom fields for debugging
                 custom_fields = [f for f in fields if f.get("id", "").startswith("customfield_")]
                 self.logger.debug(f"Found {len(custom_fields)} custom fields")
@@ -1113,7 +1113,7 @@ class JiraDescendantFinder:
             # If no allowedValues in field metadata, try alternative approaches
 
             # Try getting field configuration directly
-            field_url = f"{self.base_url}/rest/api/2/customField/customfield_12320851/option"
+            field_url = f"{self.base_url}/rest/api/2/customField/customfield_10620/option"
             self.logger.debug(f"Trying field options URL: {field_url}")
             response = self.session.get(field_url)
             self.logger.debug(f"Field options response: {response.status_code}")
@@ -1124,10 +1124,10 @@ class JiraDescendantFinder:
 
             # Try searching for existing tickets to extract possible values
             self.logger.debug("Trying to extract values from existing tickets")
-            search_url = f"{self.base_url}/rest/api/2/search"
+            search_url = f"{self.base_url}/rest/api/3/search/jql"
             params = {
                 "jql": "project in (AUTOBU, VROOM) AND \"Sub-System Group\" is not EMPTY",
-                "fields": "customfield_12320851",
+                "fields": "customfield_10620",
                 "maxResults": 50,
             }
 
@@ -1140,7 +1140,7 @@ class JiraDescendantFinder:
                 # Extract unique values with their IDs if available
                 unique_options = {}
                 for issue in issues:
-                    field_value = issue.get("fields", {}).get("customfield_12320851")
+                    field_value = issue.get("fields", {}).get("customfield_10620")
                     if field_value:
                         if isinstance(field_value, dict):
                             value = field_value.get("value")
@@ -1192,7 +1192,7 @@ class JiraDescendantFinder:
             return False
 
         fields = issue_data.get("fields", {})
-        current_field_value = fields.get("customfield_12320851")
+        current_field_value = fields.get("customfield_10620")
 
         # Parse current values
         current_values = []
@@ -1235,7 +1235,7 @@ class JiraDescendantFinder:
             raise ValueError(f"Invalid operation: {operation}")
 
         # The Sub-System Group field expects an array format
-        payload = {"fields": {"customfield_12320851": new_values if new_values else None}}
+        payload = {"fields": {"customfield_10620": new_values if new_values else None}}
 
         try:
             response = self.session.put(url, json=payload)
@@ -1293,7 +1293,7 @@ class JiraDescendantFinder:
             assigned_team_field = None
 
             for field in fields:
-                if field.get("id") == "customfield_12326540":
+                if field.get("id") == "customfield_10606":
                     assigned_team_field = field
                     self.logger.debug(f"Found Assigned Team field: {field}")
                     # Found the Assigned Team field, get its options
@@ -1303,7 +1303,7 @@ class JiraDescendantFinder:
                     break
 
             if not assigned_team_field:
-                self.logger.debug("Assigned Team field customfield_12326540 not found in field list")
+                self.logger.debug("Assigned Team field customfield_10606 not found in field list")
                 # Log all custom fields for debugging
                 custom_fields = [f for f in fields if f.get("id", "").startswith("customfield_")]
                 self.logger.debug(f"Found {len(custom_fields)} custom fields")
@@ -1313,7 +1313,7 @@ class JiraDescendantFinder:
             # If no allowedValues in field metadata, try alternative approaches
 
             # Try getting field configuration directly
-            field_url = f"{self.base_url}/rest/api/2/customField/customfield_12326540/option"
+            field_url = f"{self.base_url}/rest/api/2/customField/customfield_10606/option"
             self.logger.debug(f"Trying field options URL: {field_url}")
             response = self.session.get(field_url)
             self.logger.debug(f"Field options response: {response.status_code}")
@@ -1324,10 +1324,10 @@ class JiraDescendantFinder:
 
             # Try searching for existing tickets to extract possible values
             self.logger.debug("Trying to extract values from existing tickets")
-            search_url = f"{self.base_url}/rest/api/2/search"
+            search_url = f"{self.base_url}/rest/api/3/search/jql"
             params = {
                 "jql": "project in (AUTOBU, VROOM) AND AssignedTeam is not EMPTY",
-                "fields": "customfield_12326540",
+                "fields": "customfield_10606",
                 "maxResults": 50,
             }
 
@@ -1340,7 +1340,7 @@ class JiraDescendantFinder:
                 # Extract unique values with their IDs if available
                 unique_options = {}
                 for issue in issues:
-                    field_value = issue.get("fields", {}).get("customfield_12326540")
+                    field_value = issue.get("fields", {}).get("customfield_10606")
                     if field_value:
                         if isinstance(field_value, dict):
                             value = field_value.get("value")
@@ -1389,7 +1389,7 @@ class JiraDescendantFinder:
             return False
 
         fields = issue_data.get("fields", {})
-        current_field_value = fields.get("customfield_12326540")
+        current_field_value = fields.get("customfield_10606")
 
         # Get current value for comparison
         current_value = None
@@ -1406,11 +1406,11 @@ class JiraDescendantFinder:
 
         # Set new value - use single value format for assigned team
         if value:
-            payload = {"fields": {"customfield_12326540": {"value": value}}}
+            payload = {"fields": {"customfield_10606": {"value": value}}}
             action_verb = "Set"
         else:
             # Clear the field
-            payload = {"fields": {"customfield_12326540": None}}
+            payload = {"fields": {"customfield_10606": None}}
             action_verb = "Cleared"
 
         try:
