@@ -1779,7 +1779,7 @@ class JiraDescendantFinder:
                     current_values = [current_values] if current_values else []
 
                 op = sub_system_operation or operation
-                if op == "add":
+                if op == "append":
                     needs_update = target_value not in current_values
                 elif op == "remove":
                     needs_update = target_value in current_values
