@@ -128,6 +128,8 @@ class TicketSection:
     def __init__(self, section_type: str, line_num: int):
         self.section_type = section_type  # 'AUTOBU Initiative' or 'VROOM Epic N'
         self.start_line = line_num
+        self.id = None  # Existing ticket ID (e.g., 'AUTOBU-1234')
+        self.id_line = None
         self.parent = None
         self.parent_line = None
         self.title = None
@@ -196,7 +198,11 @@ def parse_sections(file_path: str) -> tuple[List[TicketSection], List[ParseError
 
         # Parse fields within a section
         if current_section:
-            if stripped.startswith('Parent:'):
+            if stripped.startswith('ID:'):
+                current_section.id = stripped[3:].strip()
+                current_section.id_line = line_num
+                in_description = False
+            elif stripped.startswith('Parent:'):
                 current_section.parent = stripped[7:].strip()
                 current_section.parent_line = line_num
                 in_description = False
@@ -243,6 +249,15 @@ def validate_sections(sections: List[TicketSection]) -> List[ParseError]:
 
     # Validate AUTOBU Initiative
     for autobu in autobu_sections:
+        # Validate ID format if present (optional)
+        if autobu.id:
+            if not re.match(r'^[A-Z]+-\d+$', autobu.id):
+                errors.append(ParseError(
+                    autobu.id_line,
+                    f"Invalid ID format: '{autobu.id}' (expected format: PROJECT-123)",
+                    f"ID: {autobu.id}"
+                ))
+
         # Validate parent format if present (optional)
         if autobu.parent:
             if not re.match(r'^[A-Z]+-\d+$', autobu.parent):
@@ -252,18 +267,19 @@ def validate_sections(sections: List[TicketSection]) -> List[ParseError]:
                     f"Parent: {autobu.parent}"
                 ))
 
-        # Check required fields
-        if not autobu.title:
-            errors.append(ParseError(
-                autobu.start_line,
-                "AUTOBU Initiative is missing 'Title:' field"
-            ))
+        # Check required fields (only if ID is not set)
+        if not autobu.id:
+            if not autobu.title:
+                errors.append(ParseError(
+                    autobu.start_line,
+                    "AUTOBU Initiative is missing 'Title:' field (required unless ID: is specified)"
+                ))
 
-        if not autobu.description:
-            errors.append(ParseError(
-                autobu.start_line,
-                "AUTOBU Initiative is missing 'Description:' field"
-            ))
+            if not autobu.description:
+                errors.append(ParseError(
+                    autobu.start_line,
+                    "AUTOBU Initiative is missing 'Description:' field (required unless ID: is specified)"
+                ))
 
     # Validate VROOM Epics
     vroom_sections = [s for s in sections if s.section_type.startswith('VROOM Epic')]
@@ -280,17 +296,23 @@ def validate_sections(sections: List[TicketSection]) -> List[ParseError]:
                 f"{vroom.section_type} is missing 'Description:' field"
             ))
 
-    # Check for Goal and Acceptance criteria across all sections
-    has_any_goal = any(s.has_goal for s in sections)
-    has_any_criteria = any(s.has_acceptance_criteria for s in sections)
+    # Check for Goal and Acceptance criteria across sections that will be created
+    # (skip AUTOBU Initiative if it has an ID, since we won't create it)
+    sections_to_create = [
+        s for s in sections
+        if not (s.section_type == 'AUTOBU Initiative' and s.id)
+    ]
 
-    if not has_any_goal:
+    has_any_goal = any(s.has_goal for s in sections_to_create)
+    has_any_criteria = any(s.has_acceptance_criteria for s in sections_to_create)
+
+    if sections_to_create and not has_any_goal:
         errors.append(ParseError(
             1,
             "Missing 'h2. Goal' sections in descriptions - all tickets should have goals defined (use Jira markup: h2. Goal)"
         ))
 
-    if not has_any_criteria:
+    if sections_to_create and not has_any_criteria:
         errors.append(ParseError(
             1,
             "Missing 'h2. Acceptance criteria' sections in descriptions - all tickets should have acceptance criteria (use Jira markup: h2. Acceptance criteria)"
@@ -361,15 +383,22 @@ def parse_input_file(file_path: str, variables: Dict[str, str]) -> List[Dict]:
     tickets = []
 
     # Convert sections to ticket dictionaries
+    existing_autobu_id = None
     for section in sections:
         if section.section_type == 'AUTOBU Initiative':
+            # If ID is specified, don't create this ticket - just save the ID for linking
+            if section.id:
+                existing_autobu_id = apply_variables(section.id, variables)
+                continue
+
             tickets.append({
                 'project': 'AUTOBU',
                 'type': 'Initiative',
                 'title': apply_variables(section.title or "", variables),
                 'description': apply_variables(section.description or "", variables),
                 'parent': apply_variables(section.parent, variables) if section.parent else None,
-                'header': 'Initiative'
+                'header': 'Initiative',
+                'existing_id': None
             })
         elif section.section_type.startswith('VROOM Epic'):
             epic_num = section.section_type.split()[-1]
@@ -379,10 +408,16 @@ def parse_input_file(file_path: str, variables: Dict[str, str]) -> List[Dict]:
                 'title': apply_variables(section.title or "", variables),
                 'description': apply_variables(section.description or "", variables),
                 'parent': None,  # Will be set to AUTOBU Initiative after creation
-                'header': f'Epic {epic_num}'
+                'header': f'Epic {epic_num}',
+                'existing_id': None
             })
 
-    return tickets
+    # If we have an existing AUTOBU ID, add it to the result so caller knows
+    if existing_autobu_id:
+        # Return existing ID in a way the caller can detect
+        return tickets, existing_autobu_id
+
+    return tickets, None
 
 
 def generate_template(output_path: str) -> None:
@@ -629,11 +664,14 @@ def main():
             print("Variables: None (placeholders will remain unchanged)")
         print("="*70 + "\n")
 
-        tickets = parse_input_file(args.input, variables)
+        tickets, existing_autobu_id = parse_input_file(args.input, variables)
 
-        if not tickets:
+        if not tickets and not existing_autobu_id:
             print("No tickets found in input file!")
             sys.exit(1)
+
+        if existing_autobu_id:
+            print(f"Using existing AUTOBU Initiative: {existing_autobu_id}\n")
 
         print(f"Found {len(tickets)} tickets to create:\n")
         for i, ticket in enumerate(tickets, 1):
@@ -660,13 +698,13 @@ def main():
 
         # Create tickets for this set
         created_keys = []
-        autobu_initiative_key = None
+        autobu_initiative_key = existing_autobu_id  # Use existing ID if provided
 
         for ticket in tickets:
             # Determine parent
             parent_key = ticket['parent']
 
-            # If this is a VROOM epic and we just created the AUTOBU initiative,
+            # If this is a VROOM epic and we have an AUTOBU initiative (created or existing),
             # link it to that initiative
             if ticket['project'] == 'VROOM' and autobu_initiative_key:
                 parent_key = autobu_initiative_key
@@ -682,7 +720,7 @@ def main():
 
             created_keys.append(issue_key)
 
-            # Save the AUTOBU initiative key for linking VROOM epics
+            # Save the AUTOBU initiative key for linking VROOM epics (only if we created it)
             if ticket['project'] == 'AUTOBU':
                 autobu_initiative_key = issue_key
 
@@ -694,7 +732,10 @@ def main():
             print(f"  - {key}")
 
         if autobu_initiative_key:
-            print(f"\nParent Initiative: {autobu_initiative_key}")
+            if existing_autobu_id:
+                print(f"\nLinked to existing Initiative: {autobu_initiative_key}")
+            else:
+                print(f"\nParent Initiative: {autobu_initiative_key}")
             print(f"View hierarchy: python jira-tcktmngr.py find {autobu_initiative_key}")
 
         all_created_keys.extend(created_keys)

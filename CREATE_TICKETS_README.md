@@ -82,9 +82,10 @@ h2. Acceptance criteria
 ### Required Fields
 
 **PARENT_PROJECT Initiative:**
-- `Title:` (required)
-- `Description:` (required)
-- `Parent:` (optional, format: `PROJECT-123`)
+- `ID:` (optional, format: `PROJECT-123`) - Use existing ticket instead of creating new Initiative
+- `Title:` (required, unless `ID:` is specified)
+- `Description:` (required, unless `ID:` is specified)
+- `Parent:` (optional, format: `PROJECT-123`) - Parent of the Initiative (if creating one)
 
 **EPIC_PROJECT Epics:**
 - `Title:` (required)
@@ -108,6 +109,35 @@ python create_tickets.py --vars AREA=Audio --input my_template.txt
 # Different Jira config
 python create_tickets.py --vars AREA=Camera --config ~/.jira-prod
 ```
+
+### Adding Epics to Existing Tickets
+
+To create VROOM Epics under an **existing** PARENT_PROJECT Initiative, use the `ID:` field:
+
+```markdown
+# PARENT_PROJECT Initiative
+ID: PARENT_PROJECT-1234
+
+# VROOM Epic 1
+Title: Add {FEATURE} support for {AREA}
+Description:
+h2. Goal
+* Implement the feature
+
+h2. Acceptance criteria
+* Feature works as expected
+```
+
+```bash
+python create_tickets.py --vars AREA=Graphics --vars FEATURE=Rendering --input my_template.txt
+```
+
+This will:
+- **Skip** creating the PARENT_PROJECT Initiative
+- Create all VROOM Epics linked to PARENT_PROJECT-1234
+- Work with batch processing (each set links to the same parent)
+
+**Note:** When `ID:` is present, `Title:` and `Description:` for the Initiative become optional.
 
 ### Variable Substitution
 
@@ -264,6 +294,30 @@ python create_tickets.py \
 
 Uses a template with multiple variables for more customization.
 
+### Example 4: Adding Epics to Existing Initiative
+
+```bash
+# Create template that references existing ticket
+cat > add_epics.txt <<EOF
+# PARENT_PROJECT Initiative
+ID: PARENT_PROJECT-1234
+
+# VROOM Epic 1
+Title: Add {FEATURE} for {AREA}
+Description:
+h2. Goal
+* Implement {FEATURE}
+
+h2. Acceptance criteria
+* Feature complete
+EOF
+
+# Create epics under existing initiative
+python create_tickets.py --vars AREA=Graphics --vars FEATURE=Rendering --input add_epics.txt
+```
+
+This creates VROOM Epics linked to the existing PARENT_PROJECT-1234 ticket.
+
 ## Test Files
 
 Located in `test/` directory:
@@ -345,14 +399,14 @@ python jira-tcktmngr.py add-fix-version PARENT_PROJECT-1234 "4.5.0" --include-ch
 
 ## Troubleshooting
 
-### "Invalid parent format"
-Parent must be in format `PROJECT-123` (uppercase letters, hyphen, numbers).
+### "Invalid parent format" or "Invalid ID format"
+Both `Parent:` and `ID:` must be in format `PROJECT-123` (uppercase letters, hyphen, numbers).
 
 ### "Missing '# Goal' sections"
 All ticket descriptions must include a `# Goal` section.
 
 ### "Missing 'Title:' field"
-Every section (PARENT_PROJECT Initiative, EPIC_PROJECT Epics) must have a `Title:` field.
+Every section (PARENT_PROJECT Initiative, EPIC_PROJECT Epics) must have a `Title:` field, **unless** the Initiative has an `ID:` field (for linking to existing tickets).
 
 ### Template has wrong structure
 Make sure your file has:
